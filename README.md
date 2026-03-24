@@ -55,3 +55,18 @@ Use `build-and-upload-ota.ps1` for over-the-air updates.## Technical Details
   - If you change camera model or pinout, update `camera_pins.h` and rebuild.
   - For reliable live video and larger buffers enable PSRAM in board options.
   - The sketch runs a camera task pinned to core 0 and does display work on core 1 (dual-core usage).
+## Technical Details
+
+- **MCU / Board:** ESP32 (WROOM-32). Select the appropriate board in Arduino IDE (AI Thinker ESP32-CAM or ESP32 Wrover Module). Enable PSRAM in board settings when using a PSRAM-equipped module.
+- **Camera model:** Set by `#define CAMERA_MODEL_*` at the top of `Expressif_cam_wroom32.ino` (default: `CAMERA_MODEL_AI_THINKER`).
+- **Camera configuration (from sketch):** `xclk_freq_hz = 20000000` (20 MHz). Live/video mode uses `PIXFORMAT_RGB565` with `FRAMESIZE_QVGA` (320x240) and double buffering (`fb_count = 2`). Photo/save mode uses `PIXFORMAT_JPEG` with `FRAMESIZE_VGA` (640x480), `jpeg_quality` tuned in the sketch, and single-frame capture for saving.
+- **PSRAM usage:** The sketch checks `psramFound()` and places frame buffers in PSRAM when available (`CAMERA_FB_IN_PSRAM`). Display and temporary image buffers also prefer PSRAM.
+- **TFT display:** ST7735 via `Adafruit_ST7735`. Pins in the sketch: `TFT_SCLK=14`, `TFT_MOSI=13`, `TFT_RST=12`, `TFT_DC=2`, `TFT_CS=15`. Display dimensions configured as `128x160`.
+- **SD card:** Uses `SD_MMC` and is mounted on-demand for saves (`SD_MMC.begin("/sdcard", true)` — 1-bit mode). SD is only initialized when saving photos to avoid pin conflicts with the TFT.
+- **Controls:** Button on pin `BTN=4` (shared with the onboard flash LED) with an interrupt handler for capture/save.
+- **Networking & OTA:** OTA is enabled by `OTA_ENABLED` in the sketch. The sketch configures a static IP with `WiFi.config(...)` (example IP `REDACTED_IP`) and sets the ArduinoOTA hostname to `edge-impulse-esp32-cam`. Update `WIFI_SSID` and `WIFI_PASSWORD` in `Expressif_cam_wroom32.ino` before deployment.
+- **Libraries / dependencies:** ESP32 Arduino core (board support), `esp_camera` (and `img_converters.h`), `Adafruit_GFX`, `Adafruit_ST7735`, `SD_MMC`, `ESPmDNS`, `ArduinoOTA`.
+- **Notes:**
+  - If you change camera model or pinout, update `camera_pins.h` and rebuild.
+  - For reliable live video and larger buffers enable PSRAM in board options.
+  - The sketch runs a camera task pinned to core 0 and does display work on core 1 (dual-core usage).
