@@ -4,6 +4,7 @@
   - Button triggered capture
   - Flash white effect before showing photo
   - Linux-style boot sequence display
+  - Modular architecture with improved color accuracy
 */
 // powershell -ExecutionPolicy Bypass -File build-and-upload-ota.ps1
 #define CAMERA_MODEL_AI_THINKER
@@ -16,6 +17,10 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+
+// Custom modules for better organization and improved color handling
+#include "camera_settings.h"
+#include "sd_card_handler.h"
 
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
@@ -470,27 +475,8 @@ void setup() {
   delay(100);
   
   sensor_t * s = esp_camera_sensor_get();
-  // Adjusted for more natural colors - fix tint
-  s->set_brightness(s, 0);     // Neutral brightness
-  s->set_contrast(s, 0);       // Neutral contrast
-  s->set_saturation(s, 1);     // Slightly boost saturation for vivid colors
-  s->set_whitebal(s, 1);       // Enable auto white balance
-  s->set_awb_gain(s, 1);       // Enable AWB gain
-  s->set_wb_mode(s, 0);        // Auto WB mode
-  s->set_exposure_ctrl(s, 1);  // Auto exposure
-  s->set_aec2(s, 1);           // Enable AEC DSP
-  s->set_gain_ctrl(s, 1);      // Auto gain
-  s->set_agc_gain(s, 0);       // AGC gain 0
-  s->set_gainceiling(s, (gainceiling_t)2);  // Higher gain ceiling
-  s->set_bpc(s, 1);            // Enable black pixel correction
-  s->set_wpc(s, 1);            // Enable white pixel correction
-  s->set_raw_gma(s, 1);        // Enable gamma correction
-  s->set_lenc(s, 1);           // Enable lens correction
-  s->set_hmirror(s, 0);
-  s->set_vflip(s, 0);
-  s->set_dcw(s, 1);            // Enable downsize
-  s->set_colorbar(s, 0);       // Disable test pattern
-  s->set_special_effect(s, 0); // No special effect
+  // Use improved sensor configuration for natural colors
+  CameraSettings::configureSensorForLiveView(s);
   
   bootLogOK();
   
@@ -737,7 +723,9 @@ void savePhotoToSD() {
   
   // 3. Initialize SD card (takes over TFT pins temporarily)
   Serial.println("Initializing SD card...");
-  if (!SD_MMC.begin("/sdcard", true)) {  // 1-bit mode
+  SDCardHandler sdCard(&photoCounter);
+  
+  if (!sdCard.begin()) {
     Serial.println("SD Card init failed!");
     
     // Re-init TFT and show error
@@ -754,11 +742,11 @@ void savePhotoToSD() {
   }
   Serial.println("SD Card initialized");
   
-  // 4. Reconfigure camera to JPEG mode for saving
-  sensor_t *s = esp_camera_sensor_get();
-  esp_camera_deinit();
-  delay(100);
+  // 3b. Scan SD card and update counter to avoid overwriting
+  // This ensures we always use a unique filename
+  sdCard.updateCounterFromExistingPhotos();
   
+  // 4. Save the current camera config for restoration
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -779,90 +767,16 @@ void savePhotoToSD() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;  // JPEG for file save
-  config.frame_size = FRAMESIZE_VGA;     // 640x480 for quality
-  config.jpeg_quality = 10;              // Good quality
-  config.fb_count = 1;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("Camera reinit for JPEG failed!");
-    SD_MMC.end();
-    goto restore_camera;
-  }
+  // 5. Capture and save photo with correct colors (using SDCardHandler module)
+  //    This module applies the correct sensor settings to fix greenish tint
+  bool success = sdCard.captureAndSave(config, psramFound());
   
-  // Apply sensor settings for proper colors in JPEG mode
-  {
-    sensor_t *s = esp_camera_sensor_get();
-    s->set_brightness(s, 0);
-    s->set_contrast(s, 0);
-    s->set_saturation(s, 1);
-    s->set_whitebal(s, 1);       // Enable auto white balance
-    s->set_awb_gain(s, 1);       // Enable AWB gain  
-    s->set_wb_mode(s, 0);        // Auto WB mode
-    s->set_exposure_ctrl(s, 1);  // Auto exposure
-    s->set_aec2(s, 1);           // Enable AEC DSP
-    s->set_ae_level(s, 0);       // AE level
-    s->set_aec_value(s, 300);    // Exposure value
-    s->set_gain_ctrl(s, 1);      // Auto gain
-    s->set_agc_gain(s, 0);
-    s->set_gainceiling(s, (gainceiling_t)2);
-    s->set_bpc(s, 1);            // Black pixel correction
-    s->set_wpc(s, 1);            // White pixel correction
-    s->set_raw_gma(s, 1);        // Gamma correction
-    s->set_lenc(s, 1);           // Lens correction
-    s->set_hmirror(s, 0);
-    s->set_vflip(s, 0);
-    s->set_dcw(s, 1);
-    s->set_colorbar(s, 0);
-    s->set_special_effect(s, 0);
-    
-    // Let AWB/AEC stabilize
-    delay(300);
-    
-    // Discard first few frames to let auto settings converge
-    for (int i = 0; i < 3; i++) {
-      camera_fb_t *fb = esp_camera_fb_get();
-      if (fb) esp_camera_fb_return(fb);
-      delay(50);
-    }
-  }
-  
-  // 5. Capture JPEG frame
-  {
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("JPEG capture failed!");
-      SD_MMC.end();
-      goto restore_camera;
-    }
-    
-    Serial.printf("Captured JPEG: %d bytes\n", fb->len);
-    
-    // 6. Generate filename and save
-    char filename[32];
-    snprintf(filename, sizeof(filename), "/photo_%04d.jpg", photoCounter);
-    
-    File file = SD_MMC.open(filename, FILE_WRITE);
-    if (file) {
-      file.write(fb->buf, fb->len);
-      file.close();
-      Serial.printf("Saved: %s\n", filename);
-      photoCounter++;
-    } else {
-      Serial.println("Failed to open file for writing");
-    }
-    
-    esp_camera_fb_return(fb);
-  }
-  
-  // 7. Close SD card
-  SD_MMC.end();
+  // 6. Close SD card
+  sdCard.end();
   Serial.println("SD Card closed");
   
-restore_camera:
-  // 8. Restore camera to RGB565 mode for live view
+  // 7. Restore camera to RGB565 mode for live view
   esp_camera_deinit();
   delay(100);
   
@@ -871,33 +785,16 @@ restore_camera:
   config.jpeg_quality = 12;
   config.fb_count = 2;
   config.grab_mode = CAMERA_GRAB_LATEST;
+  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
   
   if (esp_camera_init(&config) != ESP_OK) {
     Serial.println("Camera restore failed! Rebooting...");
     ESP.restart();
   }
   
-  // Restore sensor settings
-  s = esp_camera_sensor_get();
-  s->set_brightness(s, 0);
-  s->set_contrast(s, 0);
-  s->set_saturation(s, 1);
-  s->set_whitebal(s, 1);
-  s->set_awb_gain(s, 1);
-  s->set_wb_mode(s, 0);
-  s->set_exposure_ctrl(s, 1);
-  s->set_aec2(s, 1);
-  s->set_gain_ctrl(s, 1);
-  s->set_agc_gain(s, 0);
-  s->set_gainceiling(s, (gainceiling_t)2);
-  s->set_bpc(s, 1);
-  s->set_wpc(s, 1);
-  s->set_raw_gma(s, 1);
-  s->set_lenc(s, 1);
-  s->set_hmirror(s, 0);
-  s->set_vflip(s, 0);
-  s->set_dcw(s, 1);
-  s->set_colorbar(s, 0);
+  // Restore sensor settings using CameraSettings module
+  sensor_t *s = esp_camera_sensor_get();
+  CameraSettings::configureSensorForLiveView(s);
   s->set_special_effect(s, 0);
   
   // 9. Re-init TFT (SD may have messed with pins)
