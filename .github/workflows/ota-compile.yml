@@ -135,12 +135,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: firmware-${{ needs.build-and-release.outputs.version }}
-          path: /home/runner/ota-flash
+          path: ${{ runner.temp }}/ota-flash
 
       - name: Rename to firmware.bin
         run: |
-          find /home/runner/ota-flash -name "*.bin" | head -1 | xargs -I{} mv {} /home/runner/ota-flash/firmware.bin
-          echo "Downloaded: $(du -h /home/runner/ota-flash/firmware.bin | cut -f1)"
+          find ${{ runner.temp }}/ota-flash -name "*.bin" | head -1 | xargs -I{} mv {} ${{ runner.temp }}/ota-flash/firmware.bin
+          echo "Downloaded: $(du -h ${{ runner.temp }}/ota-flash/firmware.bin | cut -f1)"
 
       - name: Find espota.py
         id: espota
@@ -163,10 +163,10 @@ jobs:
           python3 ${{ steps.espota.outputs.path }} \
             -i REDACTED_IP \
             -p 3232 \
-            -f /home/runner/ota-flash/firmware.bin \
+            -f ${{ runner.temp }}/ota-flash/firmware.bin \
             -r -d
           echo "OTA flash complete ✓"
 
       - name: Cleanup
         if: always()
-        run: rm -f /home/runner/ota-flash/firmware.bin
+        run: rm -rf ${{ runner.temp }}/ota-flash
