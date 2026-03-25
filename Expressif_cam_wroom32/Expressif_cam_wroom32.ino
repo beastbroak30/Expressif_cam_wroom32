@@ -808,7 +808,7 @@ void savePhotoToSD() {
   // 5. Capture and save photo with correct colors (using SDCardHandler module)
   //    This module applies the correct sensor settings to fix greenish tint
   bool success = sdCard.captureAndSave(config, psramFound());
-  
+  //test
   // 6. Close SD card
   sdCard.end();
   Serial.println("SD Card closed");
