@@ -1,0 +1,116 @@
+name: OTA Compile and Release
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_ota: ${{ steps.chk.outputs.should_ota }}
+    steps:
+      - name: Check commit message for (ota)
+        id: chk
+        run: |
+          MSG="${{ github.event.head_commit.message }}"
+          if echo "$MSG" | grep -qi "(ota)"; then
+            echo "should_ota=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_ota=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-release:
+    needs: check
+    if: needs.check.outputs.should_ota == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: ver
+        run: |
+          # Create version.txt at 1.0.0 if it doesn't exist yet
+          if [ ! -f version.txt ]; then echo "1.0.0" > version.txt; fi
+
+          CURRENT=$(cat version.txt | tr -d '[:space:]')
+          MAJOR=$(echo $CURRENT | cut -d. -f1)
+          MINOR=$(echo $CURRENT | cut -d. -f2)
+          NEXT_MINOR=$((MINOR + 1))
+
+          if [ $NEXT_MINOR -ge 50 ]; then
+            NEW_VER="$((MAJOR + 1)).0.0"
+          else
+            NEW_VER="${MAJOR}.${NEXT_MINOR}.0"
+          fi
+
+          echo $NEW_VER > version.txt
+          echo "version=$NEW_VER" >> $GITHUB_OUTPUT
+          echo "tag=v${NEW_VER}" >> $GITHUB_OUTPUT
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core install esp32:esp32 \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      - name: Install required libraries
+        run: |
+          arduino-cli lib install "Adafruit GFX Library"
+          arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
+          arduino-cli lib install "Adafruit BusIO"
+
+      - name: Compile firmware
+        run: |
+          mkdir -p Expressif_cam_wroom32/build
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32cam \
+            --board-options PartitionScheme=min_spiffs \
+            --output-dir Expressif_cam_wroom32/build \
+            Expressif_cam_wroom32/Expressif_cam_wroom32
+
+      - name: Rename binary with version
+        id: binary
+        run: |
+          SRC="Expressif_cam_wroom32/build/Expressif_cam_wroom32.ino.bin"
+          DEST="Expressif_cam_wroom32/build/firmware-${{ steps.ver.outputs.version }}.bin"
+          cp "$SRC" "$DEST"
+          echo "path=$DEST" >> $GITHUB_OUTPUT
+
+      - name: Commit updated version.txt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.txt
+          git commit -m "chore: bump version to ${{ steps.ver.outputs.version }} [skip ci]"
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: "Firmware ${{ steps.ver.outputs.tag }}"
+          body: |
+            **Auto-release — OTA triggered**
+
+            📌 Commit: `${{ github.event.head_commit.message }}`
+            🔑 SHA: `${{ github.sha }}`
+            📦 Board: `esp32:esp32:esp32cam`
+            🌐 Target: `REDACTED_IP:3232`
+
+            _Previous releases are kept as rollback snapshots._
+          files: Expressif_cam_wroom32/build/firmware-${{ steps.ver.outputs.version }}.bin
+          make_latest: true
