@@ -66,7 +66,7 @@ Main application logic:
 - Loop: Button handling, live video display, photo save requests
 - Helper functions: TFT drawing, status boxes, boot log system
 
-## Setup
+## Setup 
 
 ### Hardware Requirements
 - **ESP32-CAM** (AI-Thinker model with OV2640 camera)
