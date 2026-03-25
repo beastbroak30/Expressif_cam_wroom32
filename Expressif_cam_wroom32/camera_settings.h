@@ -69,10 +69,10 @@ public:
     s->set_ae_level(s, 0);        // Neutral exposure compensation
     s->set_aec_value(s, 300);     // Manual exposure value
     
-    // Gain settings for photo
+    // Gain settings for photo  
     s->set_gain_ctrl(s, 1);       // Enable auto gain
     s->set_agc_gain(s, 0);        // Manual gain value
-   s->set_gainceiling(s, (gainceiling_t)2);  // Moderate gain ceiling
+    s->set_gainceiling(s, (gainceiling_t)3);  // Increased from 2 to 3 for better low-light performance
     
     // Image quality enhancements
     s->set_bpc(s, 1);             // Black pixel correction
