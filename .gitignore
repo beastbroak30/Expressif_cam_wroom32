@@ -1,0 +1,10 @@
+# Build output folder
+build/
+
+# Compiled binaries
+*.bin
+*.elf
+*.map
+
+# OTA output directory
+G:/ota/
