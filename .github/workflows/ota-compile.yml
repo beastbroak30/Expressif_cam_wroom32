@@ -3,7 +3,7 @@ name: OTA Compile and Release
 on:
   push:
     branches: ["**"]
- 
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -80,7 +80,7 @@ jobs:
             --fqbn esp32:esp32:esp32cam \
             --board-options PartitionScheme=min_spiffs \
             --output-dir Expressif_cam_wroom32/build \
-            Expressif_cam_wroom32/Expressif_cam_wroom32
+            Expressif_cam_wroom32
 
       - name: Rename binary with version
         id: binary
