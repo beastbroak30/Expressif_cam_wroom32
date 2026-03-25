@@ -9,7 +9,7 @@ This repository contains an Arduino project for the ESP32 WROOM-32 module with c
 - `build-and-upload-ota.ps1`: PowerShell script for building and uploading via OTA
 - `build/`: Build directory
 
-## Setup
+## Setup 
 
 1. Install Arduino IDE with ESP32 board support.
 2. Configure camera pins in `camera_pins.h`.
