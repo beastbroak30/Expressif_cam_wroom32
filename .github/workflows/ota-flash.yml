@@ -1,0 +1,65 @@
+name: OTA Flash via RPi
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  flash:
+    runs-on: self-hosted  # your RPi Zero 2W
+
+    steps:
+      - name: Extract .bin URL from release
+        id: asset
+        env:
+          ASSETS_JSON: ${{ toJson(github.event.release.assets) }}
+        run: |
+          BIN_URL=$(echo "$ASSETS_JSON" | python3 -c "
+          import sys, json
+          assets = json.load(sys.stdin)
+          for a in assets:
+              if a['name'].endswith('.bin'):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          echo "url=$BIN_URL" >> $GITHUB_OUTPUT
+          echo "Firmware URL: $BIN_URL"
+
+      - name: Download firmware binary
+        run: |
+          mkdir -p ~/ota-flash
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ steps.asset.outputs.url }}" \
+            -o ~/ota-flash/firmware.bin
+          echo "Downloaded: $(du -h ~/ota-flash/firmware.bin | cut -f1)"
+
+      - name: Find espota.py
+        id: espota
+        run: |
+          ESPOTA=$(find ~/.arduino15 -name espota.py 2>/dev/null | sort -r | head -1)
+          if [ -z "$ESPOTA" ]; then
+            echo "espota.py not found, installing ESP32 core..."
+            arduino-cli core update-index \
+              --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            arduino-cli core install esp32:esp32 \
+              --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            ESPOTA=$(find ~/.arduino15 -name espota.py | sort -r | head -1)
+          fi
+          echo "path=$ESPOTA" >> $GITHUB_OUTPUT
+          echo "Using espota: $ESPOTA"
+
+      - name: Flash to ESP32 via OTA
+        run: |
+          echo "Flashing to edge-impulse-esp32-cam @ 192.168.1.51:3232..."
+          python3 ${{ steps.espota.outputs.path }} \
+            -i 192.168.1.51 \
+            -p 3232 \
+            -f ~/ota-flash/firmware.bin \
+            -r -d
+          echo "OTA flash complete ✓"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/ota-flash/firmware.bin
