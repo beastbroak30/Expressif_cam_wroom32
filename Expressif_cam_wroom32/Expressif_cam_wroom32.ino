@@ -452,7 +452,7 @@ void setup() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 24000000;  // Increased from 20MHz to 24MHz for faster operation
   
   // Live video: RGB565 for direct display (no JPEG decode needed)
   // QVGA (320x240) fits well on 128x160 TFT
@@ -466,7 +466,7 @@ void setup() {
     // Photo capture mode: JPEG for quality
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size = FRAMESIZE_VGA;
-    config.jpeg_quality = 10;
+    config.jpeg_quality = 8;  // Improved from 10 to 8 for better quality (lower = better)
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   }
@@ -803,7 +803,7 @@ void savePhotoToSD() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 24000000;  // Increased from 20MHz to 24MHz for faster operation
   
   // 5. Capture and save photo with correct colors (using SDCardHandler module)
   //    This module applies the correct sensor settings to fix greenish tint

@@ -181,7 +181,7 @@ public:
     camera_config_t jpegConfig = currentConfig;
     jpegConfig.pixel_format = PIXFORMAT_JPEG;
     jpegConfig.frame_size = FRAMESIZE_VGA;  // 640x480 for quality
-    jpegConfig.jpeg_quality = 10;           // Lower number = higher quality (10-63)
+    jpegConfig.jpeg_quality = 8;            // Improved from 10 to 8 for better quality (lower = better)
     jpegConfig.fb_count = 1;
     jpegConfig.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     jpegConfig.fb_location = hasPSRAM ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
