@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -90,6 +93,13 @@ jobs:
           cp "$SRC" "$DEST"
           echo "path=$DEST" >> $GITHUB_OUTPUT
 
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.ver.outputs.version }}
+          path: Expressif_cam_wroom32/build/firmware-${{ steps.ver.outputs.version }}.bin
+          retention-days: 1
+
       - name: Commit updated version.txt
         run: |
           git config user.name "github-actions[bot]"
@@ -114,3 +124,49 @@ jobs:
             _Previous releases are kept as rollback snapshots._
           files: Expressif_cam_wroom32/build/firmware-${{ steps.ver.outputs.version }}.bin
           make_latest: true
+
+  flash:
+    needs: [check, build-and-release]
+    if: needs.check.outputs.should_ota == 'true'
+    runs-on: self-hosted
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ needs.build-and-release.outputs.version }}
+          path: /home/runner/ota-flash
+
+      - name: Rename to firmware.bin
+        run: |
+          find /home/runner/ota-flash -name "*.bin" | head -1 | xargs -I{} mv {} /home/runner/ota-flash/firmware.bin
+          echo "Downloaded: $(du -h /home/runner/ota-flash/firmware.bin | cut -f1)"
+
+      - name: Find espota.py
+        id: espota
+        run: |
+          ESPOTA=$(find ~/.arduino15 -name espota.py 2>/dev/null | sort -r | head -1)
+          if [ -z "$ESPOTA" ]; then
+            echo "espota.py not found — installing ESP32 core..."
+            arduino-cli core update-index \
+              --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            arduino-cli core install esp32:esp32 \
+              --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            ESPOTA=$(find ~/.arduino15 -name espota.py | sort -r | head -1)
+          fi
+          echo "path=$ESPOTA" >> $GITHUB_OUTPUT
+          echo "Using espota: $ESPOTA"
+
+      - name: Flash to ESP32 via OTA
+        run: |
+          echo "Flashing firmware-${{ needs.build-and-release.outputs.version }} to REDACTED_IP:3232..."
+          python3 ${{ steps.espota.outputs.path }} \
+            -i REDACTED_IP \
+            -p 3232 \
+            -f /home/runner/ota-flash/firmware.bin \
+            -r -d
+          echo "OTA flash complete ✓"
+
+      - name: Cleanup
+        if: always()
+        run: rm -f /home/runner/ota-flash/firmware.bin
