@@ -37,7 +37,6 @@ jobs:
       - name: Compute next version
         id: ver
         run: |
-          # Create version.txt at 1.0.0 if it doesn't exist yet
           if [ ! -f version.txt ]; then echo "1.0.0" > version.txt; fi
 
           CURRENT=$(cat version.txt | tr -d '[:space:]')
@@ -58,7 +57,8 @@ jobs:
       - name: Install arduino-cli
         run: |
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-          echo "$HOME/bin" >> $GITHUB_PATH
+          sudo mv $GITHUB_WORKSPACE/bin/arduino-cli /usr/local/bin/arduino-cli
+          arduino-cli version
 
       - name: Install ESP32 core
         run: |
