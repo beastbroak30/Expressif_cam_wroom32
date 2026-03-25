@@ -17,6 +17,8 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>  // For NVS storage management
+#include <nvs_flash.h>    // For low-level NVS operations
 
 // Custom modules for better organization and improved color handling
 #include "camera_settings.h"
@@ -105,6 +107,7 @@ uint8_t *videoBuffer = NULL;
 int bootLine = 0;
 
 // Function declarations
+void clearPersistentStorage();
 void bootLog(const char* message, bool newLine = true);
 void bootLogStatus(const char* status, uint16_t color);
 void bootLogOK();
@@ -117,6 +120,36 @@ void showOTAProgress(unsigned int progress, unsigned int total);
 const char* otaErrorToText(ota_error_t error);
 void displayLiveFrame();
 void showCameraReady();
+
+// Clear all persistent storage (NVS/Preferences/EEPROM)
+// This ensures clean state on every boot
+void clearPersistentStorage() {
+  Serial.println("Clearing persistent storage (NVS)...");
+  
+  // Method 1: Clear Arduino Preferences namespace
+  Preferences prefs;
+  prefs.begin("camera", false);  // Open in read/write mode
+  prefs.clear();                  // Clear all keys in this namespace
+  prefs.end();
+  
+  // Method 2: Erase entire NVS partition (nuclear option)
+  // This clears ALL NVS data including WiFi credentials if stored
+  esp_err_t err = nvs_flash_erase();
+  if (err == ESP_OK) {
+    Serial.println("NVS flash erased successfully");
+    // Re-initialize NVS after erase
+    err = nvs_flash_init();
+    if (err == ESP_OK) {
+      Serial.println("NVS re-initialized");
+    } else {
+      Serial.printf("NVS re-init failed: %d\n", err);
+    }
+  } else {
+    Serial.printf("NVS erase failed: %d\n", err);
+  }
+  
+  Serial.println("Persistent storage cleared - starting fresh");
+}
 
 // Boot log: print message (always moves to next line for display)
 void bootLog(const char* message, bool newLine) {
@@ -341,6 +374,10 @@ void setup() {
   Serial.begin(115200);
   delay(100);
   Serial.println("\n\n");
+  
+  // ===== STEP 0: Clear any persistent storage (NVS/EEPROM) =====
+  // This ensures photo counter and any other data starts fresh on every boot
+  clearPersistentStorage();
   
   // ===== STEP 1: Initialize Display FIRST =====
   tft.initR(INITR_GREENTAB);
