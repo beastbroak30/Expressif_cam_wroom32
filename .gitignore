@@ -8,3 +8,4 @@ build/
 
 # OTA output directory
 G:/ota/
+Expressif_cam_wroom32/secrets.h

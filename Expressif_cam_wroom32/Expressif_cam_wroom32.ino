@@ -18,7 +18,8 @@
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>  // For NVS storage management
-#include <nvs_flash.h>    // For low-level NVS operations
+#include <nvs_flash.h>  
+#include "secrets.h"  // For low-level NVS operations
 
 // Custom modules for better organization and improved color handling
 #include "camera_settings.h"
@@ -76,8 +77,8 @@ volatile bool saveRequested = false;  // Flag to request photo save from main lo
 #define BOOT_START_X     2
 
 constexpr bool OTA_ENABLED = true;
-const char* WIFI_SSID = "REDACTED_SSID ";
-const char* WIFI_PASSWORD = "REDACTED_PASSWORD ";
+const char* ssid     = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
 const char* OTA_HOSTNAME = "edge-impulse-esp32-cam";
 IPAddress WIFI_LOCAL_IP(192, 168, 1, 51);
 IPAddress WIFI_GATEWAY(192, 168, 1, 1);
