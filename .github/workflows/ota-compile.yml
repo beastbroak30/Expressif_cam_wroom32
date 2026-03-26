@@ -9,15 +9,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_ota: ${{ steps.chk.outputs.should_ota }}
+      should_flash: ${{ steps.chk.outputs.should_flash }}
     steps:
-      - name: Check commit message for (ota)
+      - name: Check commit message
         id: chk
         run: |
           MSG="${{ github.event.head_commit.message }}"
           if echo "$MSG" | grep -qi "(ota)"; then
             echo "should_ota=true" >> $GITHUB_OUTPUT
+            echo "should_flash=false" >> $GITHUB_OUTPUT
+          elif echo "$MSG" | grep -qi "(flash)"; then
+            echo "should_ota=false" >> $GITHUB_OUTPUT
+            echo "should_flash=true" >> $GITHUB_OUTPUT
           else
             echo "should_ota=false" >> $GITHUB_OUTPUT
+            echo "should_flash=false" >> $GITHUB_OUTPUT
           fi
 
   build-and-release:
@@ -41,18 +47,15 @@ jobs:
         id: ver
         run: |
           if [ ! -f version.txt ]; then echo "1.0.0" > version.txt; fi
-
           CURRENT=$(cat version.txt | tr -d '[:space:]')
           MAJOR=$(echo $CURRENT | cut -d. -f1)
           MINOR=$(echo $CURRENT | cut -d. -f2)
           NEXT_MINOR=$((MINOR + 1))
-
           if [ $NEXT_MINOR -ge 50 ]; then
             NEW_VER="$((MAJOR + 1)).0.0"
           else
             NEW_VER="${MAJOR}.${NEXT_MINOR}.0"
           fi
-
           echo $NEW_VER > version.txt
           echo "version=$NEW_VER" >> $GITHUB_OUTPUT
           echo "tag=v${NEW_VER}" >> $GITHUB_OUTPUT
@@ -75,6 +78,14 @@ jobs:
           arduino-cli lib install "Adafruit GFX Library"
           arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
           arduino-cli lib install "Adafruit BusIO"
+
+      - name: Inject secrets into secrets.h
+        run: |
+          cat > Expressif_cam_wroom32/secrets.h << EOF
+          #pragma once
+          #define WIFI_SSID     "${{ secrets.WIFI_SSID }}"
+          #define WIFI_PASSWORD "${{ secrets.WIFI_PASSWORD }}"
+          EOF
 
       - name: Compile firmware
         run: |
@@ -119,11 +130,73 @@ jobs:
             📌 Commit: `${{ github.event.head_commit.message }}`
             🔑 SHA: `${{ github.sha }}`
             📦 Board: `esp32:esp32:esp32cam`
-            🌐 Target: `REDACTED_IP:3232`
+            🌐 Target: `${{ secrets.ESP32_IP }}:${{ secrets.ESP32_OTA_PORT }}`
 
             _Previous releases are kept as rollback snapshots._
           files: Expressif_cam_wroom32/build/firmware-${{ steps.ver.outputs.version }}.bin
           make_latest: true
+
+  build-flash-only:
+    needs: check
+    if: needs.check.outputs.should_flash == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set dev version label
+        id: ver
+        run: |
+          SHA="${{ github.sha }}"
+          echo "version=dev-${SHA:0:7}" >> $GITHUB_OUTPUT
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv $GITHUB_WORKSPACE/bin/arduino-cli /usr/local/bin/arduino-cli
+          arduino-cli version
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          arduino-cli core install esp32:esp32 \
+            --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+      - name: Install required libraries
+        run: |
+          arduino-cli lib install "Adafruit GFX Library"
+          arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
+          arduino-cli lib install "Adafruit BusIO"
+
+      - name: Inject secrets into secrets.h
+        run: |
+          cat > Expressif_cam_wroom32/secrets.h << EOF
+          #pragma once
+          #define WIFI_SSID     "${{ secrets.WIFI_SSID }}"
+          #define WIFI_PASSWORD "${{ secrets.WIFI_PASSWORD }}"
+          EOF
+
+      - name: Compile firmware
+        run: |
+          mkdir -p Expressif_cam_wroom32/build
+          arduino-cli compile \
+            --fqbn esp32:esp32:esp32cam \
+            --board-options PartitionScheme=min_spiffs \
+            --output-dir Expressif_cam_wroom32/build \
+            Expressif_cam_wroom32
+
+      - name: Upload binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.ver.outputs.version }}
+          path: Expressif_cam_wroom32/build/Expressif_cam_wroom32.ino.bin
+          retention-days: 1
 
   flash:
     needs: [check, build-and-release]
@@ -139,15 +212,15 @@ jobs:
 
       - name: Rename to firmware.bin
         run: |
-          find ${{ runner.temp }}/ota-flash -name "*.bin" | head -1 | xargs -I{} mv {} ${{ runner.temp }}/ota-flash/firmware.bin
-          echo "Downloaded: $(du -h ${{ runner.temp }}/ota-flash/firmware.bin | cut -f1)"
+          find ${{ runner.temp }}/ota-flash -name "*.bin" | head -1 | \
+            xargs -I{} mv {} ${{ runner.temp }}/ota-flash/firmware.bin
+          echo "Size: $(du -h ${{ runner.temp }}/ota-flash/firmware.bin | cut -f1)"
 
       - name: Find espota.py
         id: espota
         run: |
           ESPOTA=$(find ~/.arduino15 -name espota.py 2>/dev/null | sort -r | head -1)
           if [ -z "$ESPOTA" ]; then
-            echo "espota.py not found — installing ESP32 core..."
             arduino-cli core update-index \
               --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
             arduino-cli core install esp32:esp32 \
@@ -155,17 +228,97 @@ jobs:
             ESPOTA=$(find ~/.arduino15 -name espota.py | sort -r | head -1)
           fi
           echo "path=$ESPOTA" >> $GITHUB_OUTPUT
-          echo "Using espota: $ESPOTA"
 
-      - name: Flash to ESP32 via OTA
+      - name: Flash to ESP32 via OTA (with retry after 1h)
         run: |
-          echo "Flashing firmware-${{ needs.build-and-release.outputs.version }} to REDACTED_IP:3232..."
-          python3 ${{ steps.espota.outputs.path }} \
-            -i REDACTED_IP \
-            -p 3232 \
-            -f ${{ runner.temp }}/ota-flash/firmware.bin \
-            -r -d
-          echo "OTA flash complete ✓"
+          flash() {
+            python3 ${{ steps.espota.outputs.path }} \
+              -i ${{ secrets.ESP32_IP }} \
+              -p ${{ secrets.ESP32_OTA_PORT }} \
+              -f ${{ runner.temp }}/ota-flash/firmware.bin \
+              -r -d
+          }
+
+          echo "Attempt 1..."
+          if flash; then
+            echo "Flash successful on attempt 1 ✓"
+            exit 0
+          fi
+
+          echo "Attempt 1 failed. Waiting 1 hour before retry..."
+          sleep 3600
+
+          echo "Attempt 2..."
+          if flash; then
+            echo "Flash successful on attempt 2 ✓"
+            exit 0
+          fi
+
+          echo "Both attempts failed ✗"
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf ${{ runner.temp }}/ota-flash
+
+  flash-only:
+    needs: [check, build-flash-only]
+    if: needs.check.outputs.should_flash == 'true'
+    runs-on: self-hosted
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-${{ needs.build-flash-only.outputs.version }}
+          path: ${{ runner.temp }}/ota-flash
+
+      - name: Rename to firmware.bin
+        run: |
+          find ${{ runner.temp }}/ota-flash -name "*.bin" | head -1 | \
+            xargs -I{} mv {} ${{ runner.temp }}/ota-flash/firmware.bin
+          echo "Size: $(du -h ${{ runner.temp }}/ota-flash/firmware.bin | cut -f1)"
+
+      - name: Find espota.py
+        id: espota
+        run: |
+          ESPOTA=$(find ~/.arduino15 -name espota.py 2>/dev/null | sort -r | head -1)
+          if [ -z "$ESPOTA" ]; then
+            arduino-cli core update-index \
+              --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            arduino-cli core install esp32:esp32 \
+              --additional-urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+            ESPOTA=$(find ~/.arduino15 -name espota.py | sort -r | head -1)
+          fi
+          echo "path=$ESPOTA" >> $GITHUB_OUTPUT
+
+      - name: Flash to ESP32 via OTA (with retry after 1h)
+        run: |
+          flash() {
+            python3 ${{ steps.espota.outputs.path }} \
+              -i ${{ secrets.ESP32_IP }} \
+              -p ${{ secrets.ESP32_OTA_PORT }} \
+              -f ${{ runner.temp }}/ota-flash/firmware.bin \
+              -r -d
+          }
+
+          echo "Attempt 1..."
+          if flash; then
+            echo "Flash successful on attempt 1 ✓"
+            exit 0
+          fi
+
+          echo "Attempt 1 failed. Waiting 1 hour before retry..."
+          sleep 3600
+
+          echo "Attempt 2..."
+          if flash; then
+            echo "Flash successful on attempt 2 ✓"
+            exit 0
+          fi
+
+          echo "Both attempts failed ✗"
+          exit 1
 
       - name: Cleanup
         if: always()
