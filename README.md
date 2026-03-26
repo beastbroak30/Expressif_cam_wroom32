@@ -46,7 +46,7 @@ Git Push  →  GitHub-hosted runner (ubuntu-latest)
           downloads binary via GitHub artifact
                     │
               espota.py → ESP32
-              REDACTED_IP:3232
+              192.168.1.51:3232
               retry after 1h if failed
 ```
 
@@ -159,7 +159,7 @@ arduino-cli core install esp32:esp32 \
 # Register as GitHub Actions self-hosted runner
 # Get your token from: repo → Settings → Actions → Runners → New self-hosted runner
 mkdir ~/actions-runner && cd ~/actions-runner
-curl -o runner.tar.gz -L \
+curl -o runner.tar.gz -L \ 
   https://github.com/actions/runner/releases/download/v2.333.0/actions-runner-linux-arm64-2.333.0.tar.gz
 tar xzf runner.tar.gz
 ./config.sh --url https://github.com/beastbroak30/Expressif_cam_wroom32 --token YOUR_TOKEN
