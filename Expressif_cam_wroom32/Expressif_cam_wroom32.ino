@@ -49,11 +49,14 @@
 #define CAMERA_WIDTH   320
 #define CAMERA_HEIGHT  240
 
-// Downsampled dimensions for TFT (preserving aspect ratio)
-// 320x240 -> 128x96 (centered on 160-height display)
-#define DISPLAY_SCALED_WIDTH  128
-#define DISPLAY_SCALED_HEIGHT 96
-#define DISPLAY_Y_OFFSET      32  // Center vertically: (160 - 96) / 2
+// Downsampled dimensions for TFT with 90° CW rotation
+// 320x240 -> downsample to 160x120 -> rotate 90° CW -> 120x160 on display
+#define DOWNSAMPLE_WIDTH  160   // Pre-rotation intermediate width
+#define DOWNSAMPLE_HEIGHT 120   // Pre-rotation intermediate height
+#define DISPLAY_SCALED_WIDTH  120  // After rotation: fits 128-wide display
+#define DISPLAY_SCALED_HEIGHT 160  // After rotation: fills 160-tall display
+#define DISPLAY_X_OFFSET      4    // Center horizontally: (128 - 120) / 2
+#define DISPLAY_Y_OFFSET      0    // No vertical offset — fills full height
 
 // For photo mode: SXGA (1280x1024) - best quality for ESP32-CAM
 #define PHOTO_WIDTH    1280
@@ -375,7 +378,7 @@ void setupOTA() {
   ArduinoOTA.begin();
   bootLogOK();
   bootLog("IP: REDACTED_IP");
-  bootLog("OTA: edge-impulse-esp32-cam");
+  bootLog("OTA: KANCAM");
 }
 
 // setup
@@ -488,8 +491,8 @@ void setup() {
   
   bootLogOK();
   if (LIVE_VIDEO_MODE) {
-    bootLog("  Mode: RGB565 QVGA->128x96");
-    bootLog("  Preview: Full frame");
+    bootLog("  Mode: RGB565 QVGA->120x160");
+    bootLog("  Preview: Full frame 90 CW");
   } else {
     bootLog("  Mode: JPEG SXGA");
   }
@@ -687,17 +690,17 @@ void downsampleImage(uint16_t* src, int srcW, int srcH, uint16_t* dst, int dstW,
 void cameraTask(void *parameter) {
   Serial.println("Camera task started on Core 0");
   
-  // Allocate temporary buffer for downsampling
-  uint16_t* tempBuffer = (uint16_t*)ps_malloc(DISPLAY_SCALED_WIDTH * DISPLAY_SCALED_HEIGHT * sizeof(uint16_t));
+  // Allocate temporary buffer for downsampling (pre-rotation size)
+  uint16_t* tempBuffer = (uint16_t*)ps_malloc(DOWNSAMPLE_WIDTH * DOWNSAMPLE_HEIGHT * sizeof(uint16_t));
   if (!tempBuffer) {
-    tempBuffer = (uint16_t*)malloc(DISPLAY_SCALED_WIDTH * DISPLAY_SCALED_HEIGHT * sizeof(uint16_t));
+    tempBuffer = (uint16_t*)malloc(DOWNSAMPLE_WIDTH * DOWNSAMPLE_HEIGHT * sizeof(uint16_t));
   }
   if (!tempBuffer) {
     Serial.println("ERROR: Failed to allocate temp buffer for downsampling!");
     vTaskDelete(NULL);
     return;
   }
-  Serial.printf("Temp downsample buffer allocated: %d bytes\n", DISPLAY_SCALED_WIDTH * DISPLAY_SCALED_HEIGHT * 2);
+  Serial.printf("Temp downsample buffer allocated: %d bytes\n", DOWNSAMPLE_WIDTH * DOWNSAMPLE_HEIGHT * 2);
   
   while (true) {
     // Skip if frozen, paused, or frame not consumed yet
@@ -714,20 +717,25 @@ void cameraTask(void *parameter) {
     
     // Take mutex to write to display buffer
     if (xSemaphoreTake(frameMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      // Downsample full QVGA (320x240) to scaled size (128x96)
+      // Downsample full QVGA (320x240) to 160x120 intermediate
       uint16_t *srcPixels = (uint16_t*)fb->buf;
       downsampleImage(srcPixels, CAMERA_WIDTH, CAMERA_HEIGHT, 
-                     tempBuffer, DISPLAY_SCALED_WIDTH, DISPLAY_SCALED_HEIGHT);
+                     tempBuffer, DOWNSAMPLE_WIDTH, DOWNSAMPLE_HEIGHT);
       
-      // Clear display buffer (black bars for letterboxing)
+      // Clear display buffer (black side bars)
       memset(displayBuffer, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t));
       
-      // Copy downsampled image to center of display buffer
-      // (downsampleImage already outputs display-ready big-endian pixels)
-      for (int y = 0; y < DISPLAY_SCALED_HEIGHT; y++) {
-        uint16_t *srcRow = tempBuffer + (y * DISPLAY_SCALED_WIDTH);
-        uint16_t *dstRow = displayBuffer + ((y + DISPLAY_Y_OFFSET) * DISPLAY_WIDTH);
-        memcpy(dstRow, srcRow, DISPLAY_SCALED_WIDTH * sizeof(uint16_t));
+      // Rotate 90° CW and copy to display buffer
+      // 90° CW: dst(x, y) = src(DOWNSAMPLE_HEIGHT-1-x, y) -- mapping pre-rot to post-rot
+      // Pre-rotation: 160w x 120h → Post-rotation: 120w x 160h
+      for (int dy = 0; dy < DISPLAY_SCALED_HEIGHT; dy++) {
+        for (int dx = 0; dx < DISPLAY_SCALED_WIDTH; dx++) {
+          // Map rotated display coords back to pre-rotation coords
+          int srcX = dy;                          // post-rot Y → pre-rot X
+          int srcY = (DOWNSAMPLE_HEIGHT - 1) - dx; // post-rot X → pre-rot Y (flipped)
+          uint16_t pixel = tempBuffer[srcY * DOWNSAMPLE_WIDTH + srcX];
+          displayBuffer[(dy + DISPLAY_Y_OFFSET) * DISPLAY_WIDTH + (dx + DISPLAY_X_OFFSET)] = pixel;
+        }
       }
       
       newFrameReady = true;

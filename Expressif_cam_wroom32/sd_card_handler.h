@@ -181,10 +181,11 @@ public:
     camera_config_t jpegConfig = currentConfig;
     jpegConfig.pixel_format = PIXFORMAT_JPEG;
     jpegConfig.frame_size = FRAMESIZE_SXGA;  // 1280x1024 - best quality for ESP32-CAM
-    jpegConfig.jpeg_quality = 6;             // 6-10 range, lower = better quality
+    jpegConfig.jpeg_quality = 10;            // 10 for SXGA (lower causes artifacts at high res)
     jpegConfig.fb_count = 1;
     jpegConfig.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     jpegConfig.fb_location = hasPSRAM ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+    jpegConfig.xclk_freq_hz = 10000000;     // 10MHz for SXGA stability (24MHz causes line artifacts)
     
     // Reinit camera in JPEG mode
     if (esp_camera_init(&jpegConfig) != ESP_OK) {
