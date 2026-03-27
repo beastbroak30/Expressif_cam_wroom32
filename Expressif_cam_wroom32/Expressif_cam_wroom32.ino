@@ -1012,8 +1012,10 @@ void captureAndDisplay() {
                 fb->width, fb->height, fb->len, fb->format);
 
   // Allocate buffer for scaled RGB565 image
-  // VGA/4 = 160x120, each pixel = 2 bytes
-  size_t bufferSize = SCALED_WIDTH * SCALED_HEIGHT * 2;
+  // SXGA/8 = 160x128, each pixel = 2 bytes
+  int scaledW = fb->width / 8;   // 1280/8 = 160
+  int scaledH = fb->height / 8;  // 1024/8 = 128
+  size_t bufferSize = scaledW * scaledH * 2;
   uint8_t *rgb565 = NULL;
   
   // Try PSRAM first, then DRAM
@@ -1036,9 +1038,9 @@ void captureAndDisplay() {
 
   Serial.println("Decoding JPEG...");
   
-  // Decode JPEG to RGB565 with 4x downscaling
-  // JPG_SCALE_4X: 640/4=160, 480/4=120
-  bool decoded = jpg2rgb565(fb->buf, fb->len, rgb565, JPG_SCALE_4X);
+  // Decode JPEG to RGB565 with 8x downscaling
+  // JPG_SCALE_8X: 1280/8=160, 1024/8=128
+  bool decoded = jpg2rgb565(fb->buf, fb->len, rgb565, JPG_SCALE_8X);
   
   // Release camera frame buffer immediately to free memory
   esp_camera_fb_return(fb);
@@ -1058,21 +1060,26 @@ void captureAndDisplay() {
   // Clear display
   tft.fillScreen(ST77XX_BLACK);
   
-  // Calculate centering offset
-  // Scaled image: 160x120, Display: 128x160
-  // We need to crop/center - image is wider than display
-  int offsetX = 0;
-  int offsetY = (DISPLAY_HEIGHT - SCALED_HEIGHT) / 2;  // center vertically
+  // Fit full image to display preserving aspect ratio
+  // Scaled image: 160x128, Display: 128x160
+  // Scale to fit width: 128/160 = 0.8, height becomes 128*0.8 = 102
+  int fitW = DISPLAY_WIDTH;  // 128
+  int fitH = (scaledH * DISPLAY_WIDTH) / scaledW;  // 128*128/160 = 102
+  if (fitH > DISPLAY_HEIGHT) {
+    fitH = DISPLAY_HEIGHT;
+    fitW = (scaledW * DISPLAY_HEIGHT) / scaledH;
+  }
+  int offsetX = (DISPLAY_WIDTH - fitW) / 2;
+  int offsetY = (DISPLAY_HEIGHT - fitH) / 2;
   
-  // Since scaled width (160) > display width (128), we need to crop horizontally
-  // Take center portion of the image
-  int srcOffsetX = (SCALED_WIDTH - DISPLAY_WIDTH) / 2;  // 16 pixels from each side
-  
-  // Draw row by row, taking center portion
-  for (int y = 0; y < SCALED_HEIGHT; y++) {
-    // Point to the start of the row we want (skipping srcOffsetX pixels)
-    uint16_t *rowStart = (uint16_t*)(rgb565 + (y * SCALED_WIDTH + srcOffsetX) * 2);
-    tft.drawRGBBitmap(offsetX, offsetY + y, rowStart, DISPLAY_WIDTH, 1);
+  // Downsample to fit display using nearest neighbor
+  for (int dy = 0; dy < fitH; dy++) {
+    int srcY = (dy * scaledH) / fitH;
+    for (int dx = 0; dx < fitW; dx++) {
+      int srcX = (dx * scaledW) / fitW;
+      uint16_t pixel = ((uint16_t*)rgb565)[srcY * scaledW + srcX];
+      tft.drawPixel(offsetX + dx, offsetY + dy, pixel);
+    }
   }
   
   // Free the buffer
