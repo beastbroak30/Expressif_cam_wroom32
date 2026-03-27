@@ -639,66 +639,45 @@ inline uint16_t swapBytes(uint16_t pixel) {
   return (pixel >> 8) | (pixel << 8);
 }
 
-// Bilinear downsample function to fit full image on TFT
-// Scales QVGA (320x240) to fit TFT (128x160) preserving aspect ratio
+// Area-average downsample: QVGA (320x240) -> 128x96 for TFT
+// Uses integer math for speed. Handles ESP32 little-endian RGB565 byte order.
+// Each output pixel averages a block of source pixels for clean, noise-free scaling.
 void downsampleImage(uint16_t* src, int srcW, int srcH, uint16_t* dst, int dstW, int dstH) {
-  // Calculate scale factors
-  float scaleX = (float)srcW / (float)dstW;
-  float scaleY = (float)srcH / (float)dstH;
-  
-  // For each pixel in destination
   for (int dstY = 0; dstY < dstH; dstY++) {
+    // Source row range for this output row
+    int srcY0 = (dstY * srcH) / dstH;
+    int srcY1 = ((dstY + 1) * srcH) / dstH;
+    if (srcY1 > srcH) srcY1 = srcH;
+    
     for (int dstX = 0; dstX < dstW; dstX++) {
-      // Map destination pixel to source coordinates
-      float srcXf = dstX * scaleX;
-      float srcYf = dstY * scaleY;
+      // Source column range for this output pixel
+      int srcX0 = (dstX * srcW) / dstW;
+      int srcX1 = ((dstX + 1) * srcW) / dstW;
+      if (srcX1 > srcW) srcX1 = srcW;
       
-      // Get integer coordinates for nearest neighbor
-      int srcX = (int)srcXf;
-      int srcY = (int)srcYf;
+      // Accumulate RGB across the source block
+      uint32_t rSum = 0, gSum = 0, bSum = 0;
+      int count = 0;
       
-      // Bounds check
-      if (srcX >= srcW - 1) srcX = srcW - 2;
-      if (srcY >= srcH - 1) srcY = srcH - 2;
+      for (int sy = srcY0; sy < srcY1; sy++) {
+        for (int sx = srcX0; sx < srcX1; sx++) {
+          // Swap bytes first! ESP32 camera outputs little-endian RGB565
+          uint16_t raw = src[sy * srcW + sx];
+          uint16_t p = (raw >> 8) | (raw << 8);
+          
+          rSum += (p >> 11) & 0x1F;
+          gSum += (p >> 5) & 0x3F;
+          bSum += p & 0x1F;
+          count++;
+        }
+      }
       
-      // Bilinear interpolation weights
-      float fx = srcXf - srcX;
-      float fy = srcYf - srcY;
+      // Average and reconstruct RGB565 (already byte-swapped to big-endian)
+      uint16_t rOut = rSum / count;
+      uint16_t gOut = gSum / count;
+      uint16_t bOut = bSum / count;
       
-      // Get 4 neighboring pixels
-      uint16_t p00 = src[srcY * srcW + srcX];
-      uint16_t p10 = src[srcY * srcW + srcX + 1];
-      uint16_t p01 = src[(srcY + 1) * srcW + srcX];
-      uint16_t p11 = src[(srcY + 1) * srcW + srcX + 1];
-      
-      // Extract RGB components (RGB565 format)
-      // R: 5 bits (11-15), G: 6 bits (5-10), B: 5 bits (0-4)
-      uint8_t r00 = (p00 >> 11) & 0x1F;
-      uint8_t g00 = (p00 >> 5) & 0x3F;
-      uint8_t b00 = p00 & 0x1F;
-      
-      uint8_t r10 = (p10 >> 11) & 0x1F;
-      uint8_t g10 = (p10 >> 5) & 0x3F;
-      uint8_t b10 = p10 & 0x1F;
-      
-      uint8_t r01 = (p01 >> 11) & 0x1F;
-      uint8_t g01 = (p01 >> 5) & 0x3F;
-      uint8_t b01 = p01 & 0x1F;
-      
-      uint8_t r11 = (p11 >> 11) & 0x1F;
-      uint8_t g11 = (p11 >> 5) & 0x3F;
-      uint8_t b11 = p11 & 0x1F;
-      
-      // Bilinear interpolation for each channel
-      float r = r00 * (1-fx) * (1-fy) + r10 * fx * (1-fy) + r01 * (1-fx) * fy + r11 * fx * fy;
-      float g = g00 * (1-fx) * (1-fy) + g10 * fx * (1-fy) + g01 * (1-fx) * fy + g11 * fx * fy;
-      float b = b00 * (1-fx) * (1-fy) + b10 * fx * (1-fy) + b01 * (1-fx) * fy + b11 * fx * fy;
-      
-      // Clamp and reconstruct RGB565
-      uint16_t rOut = (uint16_t)(r + 0.5f) & 0x1F;
-      uint16_t gOut = (uint16_t)(g + 0.5f) & 0x3F;
-      uint16_t bOut = (uint16_t)(b + 0.5f) & 0x1F;
-      
+      // Store in big-endian (display-ready) format — no further swap needed
       dst[dstY * dstW + dstX] = (rOut << 11) | (gOut << 5) | bOut;
     }
   }
@@ -743,14 +722,12 @@ void cameraTask(void *parameter) {
       // Clear display buffer (black bars for letterboxing)
       memset(displayBuffer, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t));
       
-      // Copy downsampled image to center of display buffer with byte swap
+      // Copy downsampled image to center of display buffer
+      // (downsampleImage already outputs display-ready big-endian pixels)
       for (int y = 0; y < DISPLAY_SCALED_HEIGHT; y++) {
         uint16_t *srcRow = tempBuffer + (y * DISPLAY_SCALED_WIDTH);
         uint16_t *dstRow = displayBuffer + ((y + DISPLAY_Y_OFFSET) * DISPLAY_WIDTH);
-        
-        for (int x = 0; x < DISPLAY_SCALED_WIDTH; x++) {
-          dstRow[x] = swapBytes(srcRow[x]);
-        }
+        memcpy(dstRow, srcRow, DISPLAY_SCALED_WIDTH * sizeof(uint16_t));
       }
       
       newFrameReady = true;
