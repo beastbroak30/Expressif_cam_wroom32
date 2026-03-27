@@ -1,7 +1,7 @@
 # Expressif\_cam\_wroom32
  
 > ESP32-CAM firmware with a fully automated GitHub Actions CI/CD pipeline — compile in the cloud, flash over-the-air via Raspberry Pi Zero 2W.
-
+ 
 ---
 
 ## Hardware
