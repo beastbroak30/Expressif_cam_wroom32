@@ -1,9 +1,11 @@
 /*
-  Simple ESP32-CAM Photo Capture with ST7735 TFT Display
-  - VGA Resolution (640x480) - best balance for ESP32-CAM
-  - Button triggered capture
-  - Flash white effect before showing photo
-  - Linux-style boot sequence display
+  ESP32-CAM Photo Capture with ST7735 TFT Display
+  - Live Preview: QVGA (320x240) RGB565 downsampled to 128x96 (full frame, no crop)
+  - Photo Capture: SXGA (1280x1024) JPEG - best quality
+  - Dual-core async operation for smooth preview
+  - Button triggered photo save to SD card
+  - Flash effect and status display
+  - Linux-style boot sequence
   - Modular architecture with improved color accuracy
 */
 // powershell -ExecutionPolicy Bypass -File build-and-upload-ota.ps1
@@ -43,13 +45,19 @@
 #define DISPLAY_HEIGHT 160
 
 // For live video: QVGA (320x240) displayed on 128x160 TFT
-// We'll crop to fit the display
+// We'll downsample to fit full image (preserves aspect ratio)
 #define CAMERA_WIDTH   320
 #define CAMERA_HEIGHT  240
 
-// For photo mode: VGA (640x480) / 4 = 160x120 after JPEG decode
-#define SCALED_WIDTH   160
-#define SCALED_HEIGHT  120
+// Downsampled dimensions for TFT (preserving aspect ratio)
+// 320x240 -> 128x96 (centered on 160-height display)
+#define DISPLAY_SCALED_WIDTH  128
+#define DISPLAY_SCALED_HEIGHT 96
+#define DISPLAY_Y_OFFSET      32  // Center vertically: (160 - 96) / 2
+
+// For photo mode: SXGA (1280x1024) - best quality for ESP32-CAM
+#define PHOTO_WIDTH    1280
+#define PHOTO_HEIGHT   1024
 
 // Live video mode settings
 constexpr bool LIVE_VIDEO_MODE = true;  // true = live feed, false = button capture only
@@ -79,7 +87,7 @@ volatile bool saveRequested = false;  // Flag to request photo save from main lo
 constexpr bool OTA_ENABLED = true;
 const char* ssid     = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
-const char* OTA_HOSTNAME = "edge-impulse-esp32-cam";
+const char* OTA_HOSTNAME = "KANCAM";
 IPAddress WIFI_LOCAL_IP(192, 168, 1, 51);
 IPAddress WIFI_GATEWAY(192, 168, 1, 1);
 IPAddress WIFI_SUBNET(255, 255, 255, 0);
@@ -456,7 +464,7 @@ void setup() {
   config.xclk_freq_hz = 24000000;  // Increased from 20MHz to 24MHz for faster operation
   
   // Live video: RGB565 for direct display (no JPEG decode needed)
-  // QVGA (320x240) fits well on 128x160 TFT
+  // QVGA (320x240) for live preview with full image downsampling  
   if (LIVE_VIDEO_MODE) {
     config.pixel_format = PIXFORMAT_RGB565;
     config.frame_size = FRAMESIZE_QVGA;  // 320x240
@@ -464,10 +472,10 @@ void setup() {
     config.fb_count = 2;  // Double buffer for smooth video
     config.grab_mode = CAMERA_GRAB_LATEST;  // Always get newest frame
   } else {
-    // Photo capture mode: JPEG for quality
+    // Photo capture only mode: SXGA for best quality
     config.pixel_format = PIXFORMAT_JPEG;
-    config.frame_size = FRAMESIZE_VGA;
-    config.jpeg_quality = 8;  // Improved from 10 to 8 for better quality (lower = better)
+    config.frame_size = FRAMESIZE_SXGA;  // 1280x1024
+    config.jpeg_quality = 6;  // Lower = better quality (6-10 range)
     config.fb_count = 1;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   }
@@ -480,9 +488,10 @@ void setup() {
   
   bootLogOK();
   if (LIVE_VIDEO_MODE) {
-    bootLog("  Mode: RGB565 320x240");
+    bootLog("  Mode: RGB565 QVGA->128x96");
+    bootLog("  Preview: Full frame");
   } else {
-    bootLog("  Mode: JPEG VGA");
+    bootLog("  Mode: JPEG SXGA");
   }
   
   // ===== STEP 8: Initialize Camera =====
@@ -630,9 +639,86 @@ inline uint16_t swapBytes(uint16_t pixel) {
   return (pixel >> 8) | (pixel << 8);
 }
 
+// Bilinear downsample function to fit full image on TFT
+// Scales QVGA (320x240) to fit TFT (128x160) preserving aspect ratio
+void downsampleImage(uint16_t* src, int srcW, int srcH, uint16_t* dst, int dstW, int dstH) {
+  // Calculate scale factors
+  float scaleX = (float)srcW / (float)dstW;
+  float scaleY = (float)srcH / (float)dstH;
+  
+  // For each pixel in destination
+  for (int dstY = 0; dstY < dstH; dstY++) {
+    for (int dstX = 0; dstX < dstW; dstX++) {
+      // Map destination pixel to source coordinates
+      float srcXf = dstX * scaleX;
+      float srcYf = dstY * scaleY;
+      
+      // Get integer coordinates for nearest neighbor
+      int srcX = (int)srcXf;
+      int srcY = (int)srcYf;
+      
+      // Bounds check
+      if (srcX >= srcW - 1) srcX = srcW - 2;
+      if (srcY >= srcH - 1) srcY = srcH - 2;
+      
+      // Bilinear interpolation weights
+      float fx = srcXf - srcX;
+      float fy = srcYf - srcY;
+      
+      // Get 4 neighboring pixels
+      uint16_t p00 = src[srcY * srcW + srcX];
+      uint16_t p10 = src[srcY * srcW + srcX + 1];
+      uint16_t p01 = src[(srcY + 1) * srcW + srcX];
+      uint16_t p11 = src[(srcY + 1) * srcW + srcX + 1];
+      
+      // Extract RGB components (RGB565 format)
+      // R: 5 bits (11-15), G: 6 bits (5-10), B: 5 bits (0-4)
+      uint8_t r00 = (p00 >> 11) & 0x1F;
+      uint8_t g00 = (p00 >> 5) & 0x3F;
+      uint8_t b00 = p00 & 0x1F;
+      
+      uint8_t r10 = (p10 >> 11) & 0x1F;
+      uint8_t g10 = (p10 >> 5) & 0x3F;
+      uint8_t b10 = p10 & 0x1F;
+      
+      uint8_t r01 = (p01 >> 11) & 0x1F;
+      uint8_t g01 = (p01 >> 5) & 0x3F;
+      uint8_t b01 = p01 & 0x1F;
+      
+      uint8_t r11 = (p11 >> 11) & 0x1F;
+      uint8_t g11 = (p11 >> 5) & 0x3F;
+      uint8_t b11 = p11 & 0x1F;
+      
+      // Bilinear interpolation for each channel
+      float r = r00 * (1-fx) * (1-fy) + r10 * fx * (1-fy) + r01 * (1-fx) * fy + r11 * fx * fy;
+      float g = g00 * (1-fx) * (1-fy) + g10 * fx * (1-fy) + g01 * (1-fx) * fy + g11 * fx * fy;
+      float b = b00 * (1-fx) * (1-fy) + b10 * fx * (1-fy) + b01 * (1-fx) * fy + b11 * fx * fy;
+      
+      // Clamp and reconstruct RGB565
+      uint16_t rOut = (uint16_t)(r + 0.5f) & 0x1F;
+      uint16_t gOut = (uint16_t)(g + 0.5f) & 0x3F;
+      uint16_t bOut = (uint16_t)(b + 0.5f) & 0x1F;
+      
+      dst[dstY * dstW + dstX] = (rOut << 11) | (gOut << 5) | bOut;
+    }
+  }
+}
+
 // Camera capture task - runs on Core 0
 void cameraTask(void *parameter) {
   Serial.println("Camera task started on Core 0");
+  
+  // Allocate temporary buffer for downsampling
+  uint16_t* tempBuffer = (uint16_t*)ps_malloc(DISPLAY_SCALED_WIDTH * DISPLAY_SCALED_HEIGHT * sizeof(uint16_t));
+  if (!tempBuffer) {
+    tempBuffer = (uint16_t*)malloc(DISPLAY_SCALED_WIDTH * DISPLAY_SCALED_HEIGHT * sizeof(uint16_t));
+  }
+  if (!tempBuffer) {
+    Serial.println("ERROR: Failed to allocate temp buffer for downsampling!");
+    vTaskDelete(NULL);
+    return;
+  }
+  Serial.printf("Temp downsample buffer allocated: %d bytes\n", DISPLAY_SCALED_WIDTH * DISPLAY_SCALED_HEIGHT * 2);
   
   while (true) {
     // Skip if frozen, paused, or frame not consumed yet
@@ -649,18 +735,21 @@ void cameraTask(void *parameter) {
     
     // Take mutex to write to display buffer
     if (xSemaphoreTake(frameMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-      // Center crop and byte-swap directly into display buffer
-      int srcOffsetX = (CAMERA_WIDTH - DISPLAY_WIDTH) / 2;
-      int srcOffsetY = (CAMERA_HEIGHT - DISPLAY_HEIGHT) / 2;
+      // Downsample full QVGA (320x240) to scaled size (128x96)
       uint16_t *srcPixels = (uint16_t*)fb->buf;
+      downsampleImage(srcPixels, CAMERA_WIDTH, CAMERA_HEIGHT, 
+                     tempBuffer, DISPLAY_SCALED_WIDTH, DISPLAY_SCALED_HEIGHT);
       
-      for (int y = 0; y < DISPLAY_HEIGHT; y++) {
-        int srcRow = srcOffsetY + y;
-        uint16_t *rowStart = srcPixels + (srcRow * CAMERA_WIDTH) + srcOffsetX;
-        uint16_t *dstRow = displayBuffer + (y * DISPLAY_WIDTH);
+      // Clear display buffer (black bars for letterboxing)
+      memset(displayBuffer, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t));
+      
+      // Copy downsampled image to center of display buffer with byte swap
+      for (int y = 0; y < DISPLAY_SCALED_HEIGHT; y++) {
+        uint16_t *srcRow = tempBuffer + (y * DISPLAY_SCALED_WIDTH);
+        uint16_t *dstRow = displayBuffer + ((y + DISPLAY_Y_OFFSET) * DISPLAY_WIDTH);
         
-        for (int x = 0; x < DISPLAY_WIDTH; x++) {
-          dstRow[x] = swapBytes(rowStart[x]);
+        for (int x = 0; x < DISPLAY_SCALED_WIDTH; x++) {
+          dstRow[x] = swapBytes(srcRow[x]);
         }
       }
       
@@ -757,7 +846,7 @@ void savePhotoToSD() {
   Serial.println("Camera paused");
   
   // 2. Show "Saving..." message
-  showStatusBox("Saving to SDCARD...", ST77XX_BLUE, ST77XX_WHITE);
+  showStatusBox("Saving...", ST77XX_BLUE, ST77XX_WHITE);
   
   // 3. Initialize SD card (takes over TFT pins temporarily)
   Serial.println("Initializing SD card...");

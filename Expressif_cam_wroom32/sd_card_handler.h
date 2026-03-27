@@ -180,8 +180,8 @@ public:
     // Configure for JPEG capture
     camera_config_t jpegConfig = currentConfig;
     jpegConfig.pixel_format = PIXFORMAT_JPEG;
-    jpegConfig.frame_size = FRAMESIZE_VGA;  // 640x480 for quality
-    jpegConfig.jpeg_quality = 8;            // Improved from 10 to 8 for better quality (lower = better)
+    jpegConfig.frame_size = FRAMESIZE_SXGA;  // 1280x1024 - best quality for ESP32-CAM
+    jpegConfig.jpeg_quality = 6;             // 6-10 range, lower = better quality
     jpegConfig.fb_count = 1;
     jpegConfig.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     jpegConfig.fb_location = hasPSRAM ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
