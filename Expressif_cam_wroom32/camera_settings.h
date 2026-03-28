@@ -49,19 +49,19 @@ public:
   }
   
   // Apply optimal sensor settings for JPEG photo capture
-  // This is where we fix the greenish tint in saved photos
+  // Tuned for accurate, neutral colors on OV2640
   static void configureSensorForPhotoCapture(sensor_t *s) {
     if (!s) return;
     
-    // Color correction - slightly different for JPEG
+    // Color correction
     s->set_brightness(s, 0);      // Neutral brightness
     s->set_contrast(s, 0);        // Neutral contrast
-    s->set_saturation(s, 0);      // Natural saturation (not 1, which can over-saturate)
+    s->set_saturation(s, -1);     // Slightly reduce saturation to counteract warm shift
     
-    // White balance - KEY FIX FOR GREENISH TINT
-    s->set_whitebal(s, 1);        // Enable auto white balance - CRITICAL!
-    s->set_awb_gain(s, 1);        // Enable AWB gain - CRITICAL!
-    s->set_wb_mode(s, 0);         // Auto WB mode (let camera decide)
+    // White balance — force auto with gain to prevent yellow/warm tint
+    s->set_whitebal(s, 1);        // Enable auto white balance
+    s->set_awb_gain(s, 1);        // Enable AWB gain
+    s->set_wb_mode(s, 1);         // 1=Sunny (neutral daylight, prevents yellow cast)
     
     // Exposure settings for photo
     s->set_exposure_ctrl(s, 1);   // Enable auto exposure
@@ -72,7 +72,7 @@ public:
     // Gain settings for photo  
     s->set_gain_ctrl(s, 1);       // Enable auto gain
     s->set_agc_gain(s, 0);        // Manual gain value
-    s->set_gainceiling(s, (gainceiling_t)3);  // Increased from 2 to 3 for better low-light performance
+    s->set_gainceiling(s, (gainceiling_t)2);  // Lower gain ceiling to reduce noise/color shift
     
     // Image quality enhancements
     s->set_bpc(s, 1);             // Black pixel correction
@@ -92,17 +92,17 @@ public:
   
   // Wait for auto white balance and auto exposure to stabilize
   // Call this after changing camera mode or settings
-  static void waitForAutoSettingsToStabilize(int delayMs = 500) {
+  static void waitForAutoSettingsToStabilize(int delayMs = 800) {
     delay(delayMs);
     
-    // Discard first few frames to let auto settings converge
-    // This is CRITICAL for good color accuracy
-    for (int i = 0; i < 5; i++) {  // Increased from 3 to 5 frames
+    // Discard first frames to let AWB/AEC converge
+    // More frames needed at lower XCLK (10MHz for SXGA)
+    for (int i = 0; i < 8; i++) {
       camera_fb_t *fb = esp_camera_fb_get();
       if (fb) {
         esp_camera_fb_return(fb);
       }
-      delay(100);  // Give camera time between frames
+      delay(150);  // Give camera time between frames
     }
   }
 };
