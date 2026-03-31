@@ -9,7 +9,8 @@
 | Component | Detail |
 |---|---|
 | MCU | ESP32-CAM (AI Thinker) |
-| Camera | OV2640 |
+| Camera (included in board) | OV2640 |
+| button | Tactile Button |
 | Display | ST7735 TFT 128×160 |
 | Storage | MicroSD via SD\_MMC |
 | OTA Flasher | Raspberry Pi Zero 2W (on same LAN) |
@@ -19,7 +20,11 @@
 A capture button is connected to **GPIO 4** with a pull-down resistor configuration:
 
 ```
-Button Pin ──── 10kΩ ──── GPIO 4 ──── 10kΩ ──── GND
+Button Pin[1] ──── 3V3            Button Pin[2] ──── 10kΩ ──── GPIO 4 
+                                      │
+                                     10kΩ 
+                                      │
+                                      GND
 ```
 
 Pressing the button triggers photo capture and stores the image to the SD card.
@@ -46,7 +51,7 @@ Git Push  →  GitHub-hosted runner (ubuntu-latest)
           downloads binary via GitHub artifact
                     │
               espota.py → ESP32
-              192.168.1.51:3232
+              192.168.1.xx:3232
               retry after 1h if failed
 ```
 
