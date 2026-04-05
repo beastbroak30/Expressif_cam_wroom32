@@ -814,7 +814,7 @@ void displayFrameFromBuffer() {
       
       // Compute histogram from display buffer
       cameraHUD.computeHistogram(displayBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-      
+       
       // Get date+time string from RTC
       char dtStr[20] = "";
       if (rtcHandler.isAvailable()) {
