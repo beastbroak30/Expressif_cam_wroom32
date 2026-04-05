@@ -177,17 +177,17 @@ public:
     
     // Deinit current camera mode
     esp_camera_deinit();
-    delay(100);
+    delay(200);  // Give hardware time to release
     
     // Configure for JPEG capture
     camera_config_t jpegConfig = currentConfig;
     jpegConfig.pixel_format = PIXFORMAT_JPEG;
-    jpegConfig.frame_size = FRAMESIZE_SXGA;  // 1280x1024 - best quality for ESP32-CAM
-    jpegConfig.jpeg_quality = 10;            // 10 for SXGA (lower causes artifacts at high res)
+    jpegConfig.frame_size = FRAMESIZE_XGA;   // 1024x768 - reliable, fast
+    jpegConfig.jpeg_quality = 10;
     jpegConfig.fb_count = 1;
     jpegConfig.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     jpegConfig.fb_location = hasPSRAM ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
-    jpegConfig.xclk_freq_hz = 10000000;     // 10MHz for SXGA stability (24MHz causes line artifacts)
+    jpegConfig.xclk_freq_hz = 10000000;
     
     // Reinit camera in JPEG mode
     if (esp_camera_init(&jpegConfig) != ESP_OK) {
@@ -195,14 +195,16 @@ public:
       return false;
     }
     
-    // Apply optimal sensor settings for photo capture
-    // THIS IS CRITICAL FOR FIXING THE GREENISH TINT!
     s = esp_camera_sensor_get();
     CameraSettings::configureSensorForPhotoCapture(s);
-    
-    // Wait for auto white balance and exposure to stabilize
-    // This ensures accurate colors in the saved photo
     CameraSettings::waitForAutoSettingsToStabilize(500);
+    
+    // Discard first 2 frames (often corrupt/green)
+    for (int i = 0; i < 2; i++) {
+      camera_fb_t *discard = esp_camera_fb_get();
+      if (discard) esp_camera_fb_return(discard);
+      delay(100);
+    }
     
     // Capture JPEG frame
     camera_fb_t *fb = esp_camera_fb_get();
@@ -213,89 +215,159 @@ public:
     
     Serial.printf("Captured JPEG: %d bytes (%dx%d)\n", 
                   fb->len, fb->width, fb->height);
+    delay(50);  // Let system breathe
     
-    // Burn timestamp into photo if RTC is available
+    // Build filename with timestamp if RTC available
+    char filename[48];
+    unsigned int attemptNumber = *photoCounterPtr;
+    
+    if (rtc && rtc->isAvailable()) {
+      char tsFile[20];
+      rtc->getFilenameStr(tsFile, sizeof(tsFile));
+      snprintf(filename, sizeof(filename), "/IMG_%s_%04d.jpg", tsFile, attemptNumber);
+    } else {
+      snprintf(filename, sizeof(filename), "/photo_%04d.jpg", attemptNumber);
+    }
+    
+    // Ensure unique
+    while (SD_MMC.exists(filename)) {
+      attemptNumber++;
+      if (rtc && rtc->isAvailable()) {
+        char tsFile[20];
+        rtc->getFilenameStr(tsFile, sizeof(tsFile));
+        snprintf(filename, sizeof(filename), "/IMG_%s_%04d.jpg", tsFile, attemptNumber);
+      } else {
+        snprintf(filename, sizeof(filename), "/photo_%04d.jpg", attemptNumber);
+      }
+      if (attemptNumber > *photoCounterPtr + 100) {
+        Serial.println("ERROR: Cannot find unique filename!");
+        esp_camera_fb_return(fb);
+        return false;
+      }
+    }
+    *photoCounterPtr = attemptNumber;
+    
+    // Try to burn timestamp into photo if RTC available
+    bool savedWithStamp = false;
     if (rtc && rtc->isAvailable() && hasPSRAM) {
-      Serial.println("Burning timestamp into photo...");
+      Serial.println("Decoding for timestamp...");
       
-      // Decode JPEG to RGB565 in PSRAM
-      size_t rgbSize = fb->width * fb->height * 2;
+      // Decode at half resolution to save RAM and time
+      // XGA/2 = 512x384 = 393KB in RGB565 — fits easily in PSRAM
+      int halfW = fb->width / 2;
+      int halfH = fb->height / 2;
+      size_t rgbSize = halfW * halfH * 2;
       uint16_t* rgbBuf = (uint16_t*)ps_malloc(rgbSize);
       
       if (rgbBuf) {
-        bool decoded = jpg2rgb565(fb->buf, fb->len, (uint8_t*)rgbBuf, JPG_SCALE_NONE);
+        yield();
+        bool decoded = jpg2rgb565(fb->buf, fb->len, (uint8_t*)rgbBuf, JPG_SCALE_2X);
+        yield();
+        
         if (decoded) {
-          // Get timestamp string
-          char stamp[20];
-          rtc->getTimestampStr(stamp, sizeof(stamp));
+          Serial.printf("Decoded to %dx%d, stamping...\n", halfW, halfH);
           
-          // Draw timestamp bottom-right, scale 3 for SXGA readability
-          int scale = 3;
+          // Get full timestamp
+          DateTime dt = rtc->now();
+          char stamp[22];
+          snprintf(stamp, sizeof(stamp), "%02d/%02d/%04d %02d:%02d:%02d",
+                   dt.day(), dt.month(), dt.year(),
+                   dt.hour(), dt.minute(), dt.second());
+          
+          // Draw at bottom-right, scale 2 for half-res readability
+          int scale = 2;
           int textW = strlen(stamp) * 4 * scale;
           int textH = 5 * scale;
-          int tx = fb->width - textW - 6;
-          int ty = fb->height - textH - 6;
-          RTCHandler::drawTimestampOnRGB565Scaled(rgbBuf, fb->width, fb->height,
+          int tx = halfW - textW - 4;
+          int ty = halfH - textH - 4;
+          RTCHandler::drawTimestampOnRGB565Scaled(rgbBuf, halfW, halfH,
                                                   tx, ty, stamp, scale);
+          
+          Serial.println("Re-encoding JPEG...");
+          yield();
           
           // Re-encode to JPEG
           uint8_t* jpgBuf = NULL;
           size_t jpgLen = 0;
-          bool encoded = fmt2jpg((uint8_t*)rgbBuf, rgbSize, fb->width, fb->height,
-                                  PIXFORMAT_RGB565, 10, &jpgBuf, &jpgLen);
+          bool encoded = fmt2jpg((uint8_t*)rgbBuf, rgbSize, halfW, halfH,
+                                  PIXFORMAT_RGB565, 12, &jpgBuf, &jpgLen);
           free(rgbBuf);
+          yield();
           
-          if (encoded && jpgBuf) {
-            Serial.printf("Re-encoded JPEG with timestamp: %d bytes\n", jpgLen);
-            // Save the stamped JPEG manually
-            esp_camera_fb_return(fb);
-            
-            char filename[32];
-            unsigned int attemptNumber = *photoCounterPtr;
-            while (true) {
-              snprintf(filename, sizeof(filename), "/photo_%04d.jpg", attemptNumber);
-              if (!SD_MMC.exists(filename)) break;
-              attemptNumber++;
-              if (attemptNumber > *photoCounterPtr + 1000) {
-                free(jpgBuf);
-                return false;
-              }
-            }
-            *photoCounterPtr = attemptNumber;
+          if (encoded && jpgBuf && jpgLen > 0) {
+            Serial.printf("Stamped JPEG: %d bytes, saving...\n", jpgLen);
             
             File file = SD_MMC.open(filename, FILE_WRITE);
-            bool success = false;
             if (file) {
-              size_t written = file.write(jpgBuf, jpgLen);
+              // Write in chunks to avoid watchdog timeout
+              size_t offset = 0;
+              const size_t chunkSize = 4096;
+              bool writeOk = true;
+              while (offset < jpgLen) {
+                size_t toWrite = (jpgLen - offset > chunkSize) ? chunkSize : (jpgLen - offset);
+                size_t written = file.write(jpgBuf + offset, toWrite);
+                if (written != toWrite) { writeOk = false; break; }
+                offset += written;
+                yield();
+              }
               file.close();
-              success = (written == jpgLen);
-              if (success) {
+              delay(50);  // Let SD card flush
+              
+              if (writeOk) {
                 Serial.printf("SUCCESS: Saved %s with timestamp\n", filename);
                 (*photoCounterPtr)++;
+                savedWithStamp = true;
               }
             }
             free(jpgBuf);
-            return success;
           } else {
-            Serial.println("JPEG re-encode failed, saving without timestamp");
+            Serial.println("Re-encode failed");
             if (jpgBuf) free(jpgBuf);
           }
         } else {
           free(rgbBuf);
-          Serial.println("JPEG decode failed, saving without timestamp");
+          Serial.println("Decode failed");
         }
       } else {
-        Serial.println("No PSRAM for timestamp, saving without timestamp");
+        Serial.println("PSRAM alloc failed for timestamp");
       }
     }
     
-    // Save to SD card (fallback: no timestamp)
-    bool success = savePhoto(fb);
+    // Fallback: save original JPEG without timestamp
+    if (!savedWithStamp) {
+      Serial.printf("Saving original to %s...\n", filename);
+      File file = SD_MMC.open(filename, FILE_WRITE);
+      if (file) {
+        size_t offset = 0;
+        const size_t chunkSize = 4096;
+        bool writeOk = true;
+        while (offset < fb->len) {
+          size_t toWrite = (fb->len - offset > chunkSize) ? chunkSize : (fb->len - offset);
+          size_t written = file.write(fb->buf + offset, toWrite);
+          if (written != toWrite) { writeOk = false; break; }
+          offset += written;
+          yield();
+        }
+        file.close();
+        delay(50);
+        
+        if (writeOk) {
+          Serial.printf("SUCCESS: Saved %s\n", filename);
+          (*photoCounterPtr)++;
+        } else {
+          Serial.println("Write failed!");
+          esp_camera_fb_return(fb);
+          return false;
+        }
+      } else {
+        Serial.println("Failed to open file!");
+        esp_camera_fb_return(fb);
+        return false;
+      }
+    }
     
-    // Release frame buffer
     esp_camera_fb_return(fb);
-    
-    return success;
+    return true;
   }
   
   // Get free SD card space in MB

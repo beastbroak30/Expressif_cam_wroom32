@@ -893,7 +893,10 @@ void savePhotoToSD() {
   }
   Serial.println("SD Card initialized");
   
-  // 3b. Scan SD card and update counter to avoid overwriting
+  // 3b. Give SD card time to stabilize
+  delay(200);
+  
+  // 3c. Scan SD card and update counter to avoid overwriting
   // This ensures we always use a unique filename
   sdCard.updateCounterFromExistingPhotos();
   
