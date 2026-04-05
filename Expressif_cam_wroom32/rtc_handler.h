@@ -16,7 +16,7 @@
 class RTCHandler {
 private:
   RTC_DS3231 rtc;
-  bool initialized; 
+  bool initialized;  
 
 public:
   RTCHandler() : initialized(false) {}
