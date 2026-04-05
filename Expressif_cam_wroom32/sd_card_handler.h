@@ -265,7 +265,15 @@ public:
         yield();
         
         if (decoded) {
-          Serial.printf("Decoded to %dx%d, stamping...\n", halfW, halfH);
+          Serial.printf("Decoded to %dx%d, fixing byte order...\n", halfW, halfH);
+          
+          // jpg2rgb565 outputs big-endian RGB565, fmt2jpg expects little-endian
+          // Swap bytes of every pixel to fix color corruption
+          int totalPixels = halfW * halfH;
+          for (int i = 0; i < totalPixels; i++) {
+            rgbBuf[i] = (rgbBuf[i] >> 8) | (rgbBuf[i] << 8);
+          }
+          yield();
           
           // Get full timestamp
           DateTime dt = rtc->now();
