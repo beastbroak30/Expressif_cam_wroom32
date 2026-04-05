@@ -27,6 +27,7 @@
 #include "camera_settings.h"
 #include "sd_card_handler.h"
 #include "rtc_handler.h"
+#include "camera_hud.h"
 
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
@@ -85,6 +86,9 @@ volatile bool saveRequested = false;  // Flag to request photo save from main lo
 
 // RTC
 RTCHandler rtcHandler;
+
+// HUD overlay
+CameraHUD cameraHUD;
 
 // Boot log settings
 #define BOOT_LINE_HEIGHT 10
@@ -638,6 +642,10 @@ void showCameraReady() {
     newFrameReady = false;
     lastFrameTime = millis();
     frameCount = 0;
+    
+    // Init HUD overlay
+    cameraHUD.begin(&tft, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    
     Serial.println("Starting dual-core live video feed...");
     yield();
     delay(100);
@@ -789,7 +797,7 @@ void displayFrameFromBuffer() {
     newFrameReady = false;
     xSemaphoreGive(frameMutex);
     
-    // Always show FPS counter on display
+    // Update FPS counter
     frameCount++;
     unsigned long now = millis();
     if (now - lastFrameTime >= 1000) {
@@ -797,36 +805,20 @@ void displayFrameFromBuffer() {
       lastFrameTime = now;
       frameCount = 0;
     }
-    // Draw FPS every frame for always-visible counter
-    char fpsStr[12];
-    snprintf(fpsStr, sizeof(fpsStr), "%.1ffps", currentFps);
-    tft.fillRect(0, 0, 42, 10, ST77XX_BLACK);
-    tft.setCursor(2, 1);
-    tft.setTextSize(1);
-    tft.setTextColor(ST77XX_GREEN);
-    tft.print(fpsStr);
     
-    // Draw RTC date+time along right edge (vertical, reads in landscape orientation)
+    // Compute histogram from display buffer (samples every 4th pixel)
+    cameraHUD.computeHistogram(displayBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    
+    // Get date+time string
+    char dtStr[20] = "";
     if (rtcHandler.isAvailable()) {
-      char dtStr[14];
-      rtcHandler.getDateTimeCompactStr(dtStr, sizeof(dtStr));
-      int textLen = strlen(dtStr);
-      int charH = 6;  // 6px per char width at size 1 (drawn sideways)
-      int totalH = textLen * charH;
-      int startY = (DISPLAY_HEIGHT - totalH) / 2;  // center vertically
-      int xPos = DISPLAY_WIDTH - 8;  // right edge
-      
-      // Clear strip for text
-      tft.fillRect(xPos, startY - 1, 8, totalH + 2, ST77XX_BLACK);
-      
-      // Draw each character rotated 90° CW (top-to-bottom along right edge)
-      tft.setTextSize(1);
-      tft.setTextColor(ST77XX_WHITE);
-      for (int i = 0; i < textLen; i++) {
-        tft.setCursor(xPos, startY + i * charH);
-        tft.print(dtStr[i]);
-      }
+      DateTime dt = rtcHandler.now();
+      snprintf(dtStr, sizeof(dtStr), "%02d/%02d/%04d %02d:%02d",
+               dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
     }
+    
+    // Draw DSLR-style HUD overlay
+    cameraHUD.draw(currentFps, dtStr, photoCounter, false);
   }
 }
 
