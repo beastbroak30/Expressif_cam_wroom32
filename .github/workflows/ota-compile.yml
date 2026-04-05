@@ -75,9 +75,12 @@ jobs:
 
       - name: Install required libraries
         run: |
-          arduino-cli lib install "Adafruit GFX Library"
-          arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
-          arduino-cli lib install "Adafruit BusIO"
+          while IFS= read -r lib || [ -n "$lib" ]; do
+            lib=$(echo "$lib" | xargs)
+            [ -z "$lib" ] && continue
+            echo "Installing: $lib"
+            arduino-cli lib install "$lib"
+          done < libraries.txt
 
       - name: Inject secrets into secrets.h
         run: |
@@ -170,9 +173,12 @@ jobs:
 
       - name: Install required libraries
         run: |
-          arduino-cli lib install "Adafruit GFX Library"
-          arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
-          arduino-cli lib install "Adafruit BusIO"
+          while IFS= read -r lib || [ -n "$lib" ]; do
+            lib=$(echo "$lib" | xargs)
+            [ -z "$lib" ] && continue
+            echo "Installing: $lib"
+            arduino-cli lib install "$lib"
+          done < libraries.txt
 
       - name: Inject secrets into secrets.h
         run: |

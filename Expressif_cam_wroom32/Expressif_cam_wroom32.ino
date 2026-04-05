@@ -26,6 +26,7 @@
 // Custom modules for better organization and improved color handling
 #include "camera_settings.h"
 #include "sd_card_handler.h"
+#include "rtc_handler.h"
 
 #include <Adafruit_GFX.h>    // Core graphics library
 #include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
@@ -81,6 +82,9 @@ SemaphoreHandle_t frameMutex = NULL;
 // Photo saving
 unsigned int photoCounter = 0;
 volatile bool saveRequested = false;  // Flag to request photo save from main loop
+
+// RTC
+RTCHandler rtcHandler;
 
 // Boot log settings
 #define BOOT_LINE_HEIGHT 10
@@ -542,6 +546,20 @@ void setup() {
     bootLogFAIL();
   }
 
+  // ===== STEP 10b: Initialize RTC (DS3231) =====
+  bootLog("RTC DS3231...", false);
+  if (rtcHandler.begin()) {
+    bootLogOK();
+    char timeStr[20];
+    rtcHandler.getTimeStr(timeStr, sizeof(timeStr));
+    char rtcMsg[30];
+    snprintf(rtcMsg, sizeof(rtcMsg), "  Time: %s", timeStr);
+    bootLog(rtcMsg);
+  } else {
+    bootLogFAIL();
+    bootLog("  No RTC - no timestamps");
+  }
+
   // ===== STEP 11: SD Card (on-demand) =====
   // SD_MMC uses pins shared with TFT, so we init/deinit only when saving photos
   bootLog("SD Card...", false);
@@ -787,6 +805,18 @@ void displayFrameFromBuffer() {
     tft.setTextSize(1);
     tft.setTextColor(ST77XX_GREEN);
     tft.print(fpsStr);
+    
+    // Draw RTC time in bottom-right corner
+    if (rtcHandler.isAvailable()) {
+      char timeStr[10];
+      rtcHandler.getTimeStr(timeStr, sizeof(timeStr));
+      int tw = strlen(timeStr) * 6; // 6px per char at size 1
+      tft.fillRect(DISPLAY_WIDTH - tw - 2, DISPLAY_HEIGHT - 10, tw + 2, 10, ST77XX_BLACK);
+      tft.setCursor(DISPLAY_WIDTH - tw - 1, DISPLAY_HEIGHT - 9);
+      tft.setTextSize(1);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.print(timeStr);
+    }
   }
 }
 
@@ -882,7 +912,7 @@ void savePhotoToSD() {
   
   // 5. Capture and save photo with correct colors (using SDCardHandler module)
   //    This module applies the correct sensor settings to fix greenish tint
-  bool success = sdCard.captureAndSave(config, psramFound());
+  bool success = sdCard.captureAndSave(config, psramFound(), &rtcHandler);
   //test
   // 6. Close SD card
   sdCard.end();

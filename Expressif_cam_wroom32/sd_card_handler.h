@@ -4,7 +4,9 @@
 #include "SD_MMC.h"
 #include "FS.h"
 #include "esp_camera.h"
+#include "img_converters.h"
 #include "camera_settings.h"
+#include "rtc_handler.h"
 
 // SD Card Handler Module
 // Handles photo saving to SD card with proper color management
@@ -169,7 +171,7 @@ public:
   
   // Capture and save photo with correct colors
   // This reconfigures camera to JPEG mode, captures, saves, then restores
-  bool captureAndSave(camera_config_t& currentConfig, bool hasPSRAM) {
+  bool captureAndSave(camera_config_t& currentConfig, bool hasPSRAM, RTCHandler* rtc = nullptr) {
     // Store reference to sensor for later
     sensor_t *s = esp_camera_sensor_get();
     
@@ -212,7 +214,82 @@ public:
     Serial.printf("Captured JPEG: %d bytes (%dx%d)\n", 
                   fb->len, fb->width, fb->height);
     
-    // Save to SD card
+    // Burn timestamp into photo if RTC is available
+    if (rtc && rtc->isAvailable() && hasPSRAM) {
+      Serial.println("Burning timestamp into photo...");
+      
+      // Decode JPEG to RGB565 in PSRAM
+      size_t rgbSize = fb->width * fb->height * 2;
+      uint16_t* rgbBuf = (uint16_t*)ps_malloc(rgbSize);
+      
+      if (rgbBuf) {
+        bool decoded = jpg2rgb565(fb->buf, fb->len, (uint8_t*)rgbBuf, JPG_SCALE_NONE);
+        if (decoded) {
+          // Get timestamp string
+          char stamp[20];
+          rtc->getTimestampStr(stamp, sizeof(stamp));
+          
+          // Draw timestamp bottom-right, scale 3 for SXGA readability
+          int scale = 3;
+          int textW = strlen(stamp) * 4 * scale;
+          int textH = 5 * scale;
+          int tx = fb->width - textW - 6;
+          int ty = fb->height - textH - 6;
+          RTCHandler::drawTimestampOnRGB565Scaled(rgbBuf, fb->width, fb->height,
+                                                  tx, ty, stamp, scale);
+          
+          // Re-encode to JPEG
+          uint8_t* jpgBuf = NULL;
+          size_t jpgLen = 0;
+          bool encoded = fmt2jpg((uint8_t*)rgbBuf, rgbSize, fb->width, fb->height,
+                                  PIXFORMAT_RGB565, 10, &jpgBuf, &jpgLen);
+          free(rgbBuf);
+          
+          if (encoded && jpgBuf) {
+            Serial.printf("Re-encoded JPEG with timestamp: %d bytes\n", jpgLen);
+            // Save the stamped JPEG manually
+            esp_camera_fb_return(fb);
+            
+            char filename[32];
+            unsigned int attemptNumber = *photoCounterPtr;
+            while (true) {
+              snprintf(filename, sizeof(filename), "/photo_%04d.jpg", attemptNumber);
+              if (!SD_MMC.exists(filename)) break;
+              attemptNumber++;
+              if (attemptNumber > *photoCounterPtr + 1000) {
+                free(jpgBuf);
+                return false;
+              }
+            }
+            *photoCounterPtr = attemptNumber;
+            
+            File file = SD_MMC.open(filename, FILE_WRITE);
+            bool success = false;
+            if (file) {
+              size_t written = file.write(jpgBuf, jpgLen);
+              file.close();
+              success = (written == jpgLen);
+              if (success) {
+                Serial.printf("SUCCESS: Saved %s with timestamp\n", filename);
+                (*photoCounterPtr)++;
+              }
+            }
+            free(jpgBuf);
+            return success;
+          } else {
+            Serial.println("JPEG re-encode failed, saving without timestamp");
+            if (jpgBuf) free(jpgBuf);
+          }
+        } else {
+          free(rgbBuf);
+          Serial.println("JPEG decode failed, saving without timestamp");
+        }
+      } else {
+        Serial.println("No PSRAM for timestamp, saving without timestamp");
+      }
+    }
+    
+    // Save to SD card (fallback: no timestamp)
     bool success = savePhoto(fb);
     
     // Release frame buffer
