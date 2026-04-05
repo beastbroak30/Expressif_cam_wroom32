@@ -29,11 +29,13 @@ public:
     }
     initialized = true;
 
-    // If RTC lost power, set to compile time
-    if (rtc.lostPower()) {
-      Serial.println("RTC lost power, setting to compile time");
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
+    // Always set RTC to compile time adjusted to IST (UTC+5:30)
+    // __DATE__ and __TIME__ are compile-machine local time.
+    // The workflow sets TZ=Asia/Kolkata so these are already IST.
+    // On local builds, ensure your system clock is IST or adjust accordingly.
+    DateTime compileTime(F(__DATE__), F(__TIME__));
+    rtc.adjust(compileTime);
+    Serial.println("RTC set to compile time (IST)");
 
     return true;
   }
@@ -49,6 +51,13 @@ public:
   void getTimeStr(char* buf, size_t len) {
     DateTime dt = now();
     snprintf(buf, len, "%02d:%02d:%02d", dt.hour(), dt.minute(), dt.second());
+  }
+
+  // Format: "DD/MM HH:MM" compact date+time for TFT overlay
+  void getDateTimeCompactStr(char* buf, size_t len) {
+    DateTime dt = now();
+    snprintf(buf, len, "%02d/%02d %02d:%02d",
+             dt.day(), dt.month(), dt.hour(), dt.minute());
   }
 
   // Format: "DD/MM/YY HH:MM" for photo stamp

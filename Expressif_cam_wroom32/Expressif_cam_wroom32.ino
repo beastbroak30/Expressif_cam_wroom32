@@ -806,16 +806,26 @@ void displayFrameFromBuffer() {
     tft.setTextColor(ST77XX_GREEN);
     tft.print(fpsStr);
     
-    // Draw RTC time in bottom-right corner
+    // Draw RTC date+time along right edge (vertical, reads in landscape orientation)
     if (rtcHandler.isAvailable()) {
-      char timeStr[10];
-      rtcHandler.getTimeStr(timeStr, sizeof(timeStr));
-      int tw = strlen(timeStr) * 6; // 6px per char at size 1
-      tft.fillRect(DISPLAY_WIDTH - tw - 2, DISPLAY_HEIGHT - 10, tw + 2, 10, ST77XX_BLACK);
-      tft.setCursor(DISPLAY_WIDTH - tw - 1, DISPLAY_HEIGHT - 9);
+      char dtStr[14];
+      rtcHandler.getDateTimeCompactStr(dtStr, sizeof(dtStr));
+      int textLen = strlen(dtStr);
+      int charH = 6;  // 6px per char width at size 1 (drawn sideways)
+      int totalH = textLen * charH;
+      int startY = (DISPLAY_HEIGHT - totalH) / 2;  // center vertically
+      int xPos = DISPLAY_WIDTH - 8;  // right edge
+      
+      // Clear strip for text
+      tft.fillRect(xPos, startY - 1, 8, totalH + 2, ST77XX_BLACK);
+      
+      // Draw each character rotated 90° CW (top-to-bottom along right edge)
       tft.setTextSize(1);
       tft.setTextColor(ST77XX_WHITE);
-      tft.print(timeStr);
+      for (int i = 0; i < textLen; i++) {
+        tft.setCursor(xPos, startY + i * charH);
+        tft.print(dtStr[i]);
+      }
     }
   }
 }

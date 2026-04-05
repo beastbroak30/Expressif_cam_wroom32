@@ -91,6 +91,8 @@ jobs:
           EOF
 
       - name: Compile firmware
+        env:
+          TZ: Asia/Kolkata
         run: |
           mkdir -p Expressif_cam_wroom32/build
           arduino-cli compile \
@@ -189,6 +191,8 @@ jobs:
           EOF
 
       - name: Compile firmware
+        env:
+          TZ: Asia/Kolkata
         run: |
           mkdir -p Expressif_cam_wroom32/build
           arduino-cli compile \
