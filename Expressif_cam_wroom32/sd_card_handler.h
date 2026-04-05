@@ -169,6 +169,76 @@ public:
     return true;
   }
   
+  // Build a minimal EXIF APP1 segment with DateTime tag
+  // Returns allocated buffer (caller must free) and sets len
+  // EXIF DateTime format: "YYYY:MM:DD HH:MM:SS\0" (20 bytes)
+  static uint8_t* buildExifSegment(const char* dateTime, size_t& segLen) {
+    // Minimal EXIF: APP1 marker + Exif header + TIFF header + IFD0 with DateTime
+    // TIFF is little-endian (II)
+    static const uint8_t exifTemplate[] = {
+      0xFF, 0xE1,       // APP1 marker
+      0x00, 0x00,       // Length placeholder (filled below)
+      'E','x','i','f',0x00,0x00, // Exif header
+      // TIFF header (offset 10 from APP1 data start)
+      'I','I',          // Little-endian
+      0x2A, 0x00,       // TIFF magic
+      0x08, 0x00, 0x00, 0x00, // Offset to IFD0 (8 bytes from TIFF start)
+      // IFD0 (offset 8 from TIFF start)
+      0x01, 0x00,       // 1 entry
+      // Entry: DateTime (tag 0x0132)
+      0x32, 0x01,       // Tag: DateTime
+      0x02, 0x00,       // Type: ASCII
+      0x14, 0x00, 0x00, 0x00, // Count: 20 bytes
+      0x1A, 0x00, 0x00, 0x00, // Offset to value (26 from TIFF start)
+      0x00, 0x00, 0x00, 0x00, // Next IFD: none
+      // DateTime value starts here (offset 26 from TIFF)
+      // 20 bytes of datetime string filled below
+    };
+    
+    segLen = sizeof(exifTemplate) + 20; // template + datetime string
+    uint8_t* seg = (uint8_t*)malloc(segLen);
+    if (!seg) return nullptr;
+    
+    memcpy(seg, exifTemplate, sizeof(exifTemplate));
+    // Copy datetime string (20 bytes including null)
+    memcpy(seg + sizeof(exifTemplate), dateTime, 20);
+    
+    // Fill APP1 length (everything after the 2-byte marker)
+    uint16_t app1Len = segLen - 2;
+    seg[2] = (app1Len >> 8) & 0xFF;
+    seg[3] = app1Len & 0xFF;
+    
+    return seg;
+  }
+  
+  // Write JPEG with EXIF injected: SOI + EXIF APP1 + rest of JPEG (skip original SOI)
+  bool writeJpegWithExif(File& file, const uint8_t* jpgData, size_t jpgLen, const char* exifDateTime) {
+    // Write SOI marker
+    const uint8_t soi[] = {0xFF, 0xD8};
+    file.write(soi, 2);
+    
+    // Build and write EXIF segment
+    size_t exifLen = 0;
+    uint8_t* exifSeg = buildExifSegment(exifDateTime, exifLen);
+    if (exifSeg) {
+      file.write(exifSeg, exifLen);
+      free(exifSeg);
+    }
+    
+    // Write rest of JPEG (skip original SOI 0xFFD8)
+    size_t offset = 2;
+    const size_t chunkSize = 4096;
+    bool ok = true;
+    while (offset < jpgLen) {
+      size_t toWrite = ((jpgLen - offset) > chunkSize) ? chunkSize : (jpgLen - offset);
+      size_t written = file.write(jpgData + offset, toWrite);
+      if (written != toWrite) { ok = false; break; }
+      offset += written;
+      yield();
+    }
+    return ok;
+  }
+  
   // Capture and save photo with correct colors
   // This reconfigures camera to JPEG mode, captures, saves, then restores
   bool captureAndSave(camera_config_t& currentConfig, bool hasPSRAM, RTCHandler* rtc = nullptr) {
@@ -182,12 +252,12 @@ public:
     // Configure for JPEG capture
     camera_config_t jpegConfig = currentConfig;
     jpegConfig.pixel_format = PIXFORMAT_JPEG;
-    jpegConfig.frame_size = FRAMESIZE_XGA;   // 1024x768 - reliable, fast
+    jpegConfig.frame_size = FRAMESIZE_SXGA;  // 1280x1024 - highest quality
     jpegConfig.jpeg_quality = 10;
     jpegConfig.fb_count = 1;
     jpegConfig.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     jpegConfig.fb_location = hasPSRAM ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
-    jpegConfig.xclk_freq_hz = 10000000;
+    jpegConfig.xclk_freq_hz = 10000000;     // 10MHz for SXGA stability
     
     // Reinit camera in JPEG mode
     if (esp_camera_init(&jpegConfig) != ESP_OK) {
@@ -215,7 +285,16 @@ public:
     
     Serial.printf("Captured JPEG: %d bytes (%dx%d)\n", 
                   fb->len, fb->width, fb->height);
-    delay(50);  // Let system breathe
+    delay(50);
+    
+    // Build EXIF DateTime string: "YYYY:MM:DD HH:MM:SS\0" (exactly 20 bytes)
+    char exifDateTime[20] = "2000:01:01 00:00:00";
+    if (rtc && rtc->isAvailable()) {
+      DateTime dt = rtc->now();
+      snprintf(exifDateTime, sizeof(exifDateTime), "%04d:%02d:%02d %02d:%02d:%02d",
+               dt.year(), dt.month(), dt.day(),
+               dt.hour(), dt.minute(), dt.second());
+    }
     
     // Build filename with timestamp if RTC available
     char filename[48];
@@ -240,122 +319,95 @@ public:
         snprintf(filename, sizeof(filename), "/photo_%04d.jpg", attemptNumber);
       }
       if (attemptNumber > *photoCounterPtr + 100) {
-        Serial.println("ERROR: Cannot find unique filename!");
         esp_camera_fb_return(fb);
         return false;
       }
     }
     *photoCounterPtr = attemptNumber;
     
-    // Try to burn timestamp into photo if RTC available
+    // Try full-res decode → stamp → re-encode at SXGA (1280x1024)
+    // Needs 2.6MB RGB565 in PSRAM — fits in 4MB PSRAM
     bool savedWithStamp = false;
     if (rtc && rtc->isAvailable() && hasPSRAM) {
-      Serial.println("Decoding for timestamp...");
+      Serial.println("Decoding full-res for timestamp...");
       
-      // Decode at half resolution to save RAM and time
-      // XGA/2 = 512x384 = 393KB in RGB565 — fits easily in PSRAM
-      int halfW = fb->width / 2;
-      int halfH = fb->height / 2;
-      size_t rgbSize = halfW * halfH * 2;
+      size_t rgbSize = fb->width * fb->height * 2;
       uint16_t* rgbBuf = (uint16_t*)ps_malloc(rgbSize);
       
       if (rgbBuf) {
         yield();
-        bool decoded = jpg2rgb565(fb->buf, fb->len, (uint8_t*)rgbBuf, JPG_SCALE_2X);
+        bool decoded = jpg2rgb565(fb->buf, fb->len, (uint8_t*)rgbBuf, JPG_SCALE_NONE);
         yield();
         
         if (decoded) {
-          Serial.printf("Decoded to %dx%d, fixing byte order...\n", halfW, halfH);
+          Serial.printf("Decoded %dx%d, byte-swap + stamp...\n", fb->width, fb->height);
           
-          // jpg2rgb565 outputs big-endian RGB565, fmt2jpg expects little-endian
-          // Swap bytes of every pixel to fix color corruption
-          int totalPixels = halfW * halfH;
+          // Fix byte order: jpg2rgb565 = big-endian, fmt2jpg = little-endian
+          int totalPixels = fb->width * fb->height;
           for (int i = 0; i < totalPixels; i++) {
             rgbBuf[i] = (rgbBuf[i] >> 8) | (rgbBuf[i] << 8);
           }
           yield();
           
-          // Get full timestamp
-          DateTime dt = rtc->now();
+          // Burn visible timestamp at bottom-right
           char stamp[22];
           snprintf(stamp, sizeof(stamp), "%02d/%02d/%04d %02d:%02d:%02d",
-                   dt.day(), dt.month(), dt.year(),
-                   dt.hour(), dt.minute(), dt.second());
+                   rtc->now().day(), rtc->now().month(), rtc->now().year(),
+                   rtc->now().hour(), rtc->now().minute(), rtc->now().second());
           
-          // Draw at bottom-right, scale 2 for half-res readability
-          int scale = 2;
+          int scale = 3;  // Scale 3 for SXGA readability
           int textW = strlen(stamp) * 4 * scale;
           int textH = 5 * scale;
-          int tx = halfW - textW - 4;
-          int ty = halfH - textH - 4;
-          RTCHandler::drawTimestampOnRGB565Scaled(rgbBuf, halfW, halfH,
+          int tx = fb->width - textW - 8;
+          int ty = fb->height - textH - 8;
+          RTCHandler::drawTimestampOnRGB565Scaled(rgbBuf, fb->width, fb->height,
                                                   tx, ty, stamp, scale);
           
-          Serial.println("Re-encoding JPEG...");
+          Serial.println("Re-encoding full-res JPEG...");
           yield();
           
-          // Re-encode to JPEG
           uint8_t* jpgBuf = NULL;
           size_t jpgLen = 0;
-          bool encoded = fmt2jpg((uint8_t*)rgbBuf, rgbSize, halfW, halfH,
-                                  PIXFORMAT_RGB565, 12, &jpgBuf, &jpgLen);
+          bool encoded = fmt2jpg((uint8_t*)rgbBuf, rgbSize, fb->width, fb->height,
+                                  PIXFORMAT_RGB565, 10, &jpgBuf, &jpgLen);
           free(rgbBuf);
           yield();
           
           if (encoded && jpgBuf && jpgLen > 0) {
-            Serial.printf("Stamped JPEG: %d bytes, saving...\n", jpgLen);
+            Serial.printf("Stamped JPEG: %d bytes, saving with EXIF...\n", jpgLen);
             
             File file = SD_MMC.open(filename, FILE_WRITE);
             if (file) {
-              // Write in chunks to avoid watchdog timeout
-              size_t offset = 0;
-              const size_t chunkSize = 4096;
-              bool writeOk = true;
-              while (offset < jpgLen) {
-                size_t toWrite = (jpgLen - offset > chunkSize) ? chunkSize : (jpgLen - offset);
-                size_t written = file.write(jpgBuf + offset, toWrite);
-                if (written != toWrite) { writeOk = false; break; }
-                offset += written;
-                yield();
-              }
+              bool writeOk = writeJpegWithExif(file, jpgBuf, jpgLen, exifDateTime);
               file.close();
-              delay(50);  // Let SD card flush
+              delay(50);
               
               if (writeOk) {
-                Serial.printf("SUCCESS: Saved %s with timestamp\n", filename);
+                Serial.printf("SUCCESS: Saved %s with stamp+EXIF\n", filename);
                 (*photoCounterPtr)++;
                 savedWithStamp = true;
               }
             }
             free(jpgBuf);
           } else {
-            Serial.println("Re-encode failed");
+            Serial.println("Re-encode failed, falling back");
             if (jpgBuf) free(jpgBuf);
           }
         } else {
           free(rgbBuf);
-          Serial.println("Decode failed");
+          Serial.println("Decode failed, falling back");
         }
       } else {
-        Serial.println("PSRAM alloc failed for timestamp");
+        Serial.println("PSRAM alloc failed, saving original");
       }
     }
     
-    // Fallback: save original JPEG without timestamp
+    // Fallback: save original JPEG with EXIF DateTime (no visible stamp)
     if (!savedWithStamp) {
-      Serial.printf("Saving original to %s...\n", filename);
+      Serial.printf("Saving original to %s with EXIF...\n", filename);
       File file = SD_MMC.open(filename, FILE_WRITE);
       if (file) {
-        size_t offset = 0;
-        const size_t chunkSize = 4096;
-        bool writeOk = true;
-        while (offset < fb->len) {
-          size_t toWrite = (fb->len - offset > chunkSize) ? chunkSize : (fb->len - offset);
-          size_t written = file.write(fb->buf + offset, toWrite);
-          if (written != toWrite) { writeOk = false; break; }
-          offset += written;
-          yield();
-        }
+        bool writeOk = writeJpegWithExif(file, fb->buf, fb->len, exifDateTime);
         file.close();
         delay(50);
         
