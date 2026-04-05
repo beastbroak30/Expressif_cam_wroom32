@@ -29,13 +29,16 @@ public:
     }
     initialized = true;
 
-    // Always set RTC to compile time adjusted to IST (UTC+5:30)
-    // __DATE__ and __TIME__ are compile-machine local time.
-    // The workflow sets TZ=Asia/Kolkata so these are already IST.
-    // On local builds, ensure your system clock is IST or adjust accordingly.
-    DateTime compileTime(F(__DATE__), F(__TIME__));
-    rtc.adjust(compileTime);
-    Serial.println("RTC set to compile time (IST)");
+    // Only set RTC time if it lost power (battery dead/first use)
+    // Otherwise keep the running time from the DS3231 battery backup
+    if (rtc.lostPower()) {
+      // __DATE__/__TIME__ are IST when compiled with TZ=Asia/Kolkata in workflow
+      DateTime compileTime(F(__DATE__), F(__TIME__));
+      rtc.adjust(compileTime);
+      Serial.println("RTC lost power, set to compile time (IST)");
+    } else {
+      Serial.println("RTC running from battery backup");
+    }
 
     return true;
   }

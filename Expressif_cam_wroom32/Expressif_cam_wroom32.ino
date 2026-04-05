@@ -806,19 +806,26 @@ void displayFrameFromBuffer() {
       frameCount = 0;
     }
     
-    // Compute histogram from display buffer (samples every 4th pixel)
-    cameraHUD.computeHistogram(displayBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
-    
-    // Get date+time string
-    char dtStr[20] = "";
-    if (rtcHandler.isAvailable()) {
-      DateTime dt = rtcHandler.now();
-      snprintf(dtStr, sizeof(dtStr), "%02d/%02d/%04d %02d:%02d",
-               dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
+    // HUD: only redraw every 500ms to prevent flicker
+    // Image updates every frame, HUD overlays are stable
+    static unsigned long lastHudTime = 0;
+    if (now - lastHudTime >= 500) {
+      lastHudTime = now;
+      
+      // Compute histogram from display buffer
+      cameraHUD.computeHistogram(displayBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+      
+      // Get date+time string from RTC
+      char dtStr[20] = "";
+      if (rtcHandler.isAvailable()) {
+        DateTime dt = rtcHandler.now();
+        snprintf(dtStr, sizeof(dtStr), "%02d/%02d/%04d %02d:%02d",
+                 dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
+      }
+      
+      // Draw DSLR-style HUD overlay
+      cameraHUD.draw(currentFps, dtStr, photoCounter, false);
     }
-    
-    // Draw DSLR-style HUD overlay
-    cameraHUD.draw(currentFps, dtStr, photoCounter, false);
   }
 }
 
