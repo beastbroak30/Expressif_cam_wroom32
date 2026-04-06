@@ -202,10 +202,10 @@ public:
     s[10]='I'; s[11]='I';           // little-endian
     s[12]=0x2A; s[13]=0x00;         // magic 42
     s[14]=0x08; s[15]=0x00; s[16]=0x00; s[17]=0x00; // IFD0 at T+8
-
+  
     // IFD0 at T+8 (byte 18): 2 entries
     s[18]=0x02; s[19]=0x00;
-
+    
     // IFD0 Entry 1: DateTime (0x0132), ASCII, count=20, offset=T+38
     s[20]=0x32; s[21]=0x01;         // tag 0x0132
     s[22]=0x02; s[23]=0x00;         // type: ASCII
