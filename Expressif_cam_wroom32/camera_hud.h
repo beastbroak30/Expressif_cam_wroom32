@@ -23,7 +23,7 @@ private:
   uint16_t histBins[HUD_HIST_BINS];
   uint16_t histMax;
 
-public:
+public: 
   CameraHUD() : tft(nullptr), dispW(128), dispH(160), histMax(0) {}
 
   void begin(Adafruit_ST7735* display, int w, int h) {
