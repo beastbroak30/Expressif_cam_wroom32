@@ -325,143 +325,27 @@ public:
     }
     *photoCounterPtr = attemptNumber;
     
-    // Try decode → stamp → re-encode, picking best scale that fits in free PSRAM
-    // Full:  1280x1024 = 2,621,440 bytes (+~300KB for re-encode output)
-    // 2X:    640x512   =   655,360 bytes (+~150KB)
-    // 4X:    320x256   =   163,840 bytes (+~80KB)
-    // Need ~1.5x the RGB buffer for decode + re-encode headroom
-    bool savedWithStamp = false;
-    if (rtc && rtc->isAvailable() && hasPSRAM) {
-      size_t freePsram = ESP.getFreePsram();
-      Serial.printf("Free PSRAM: %d bytes\n", freePsram);
+    // Save original JPEG with EXIF DateTime metadata (no visible overlay)
+    // Timestamp is embedded in EXIF APP1 segment — parseable but invisible
+    Serial.printf("Saving to %s with EXIF timestamp...\n", filename);
+    File file = SD_MMC.open(filename, FILE_WRITE);
+    if (file) {
+      bool writeOk = writeJpegWithExif(file, fb->buf, fb->len, exifDateTime);
+      file.close();
+      delay(50);
       
-      // Pick best scale that fits with safety margin
-      jpg_scale_t jpgScale = JPG_SCALE_NONE;
-      int decodeW = fb->width;
-      int decodeH = fb->height;
-      int stampScale = 3;
-      size_t needed = decodeW * decodeH * 2;
-      
-      if (needed * 1.5 > freePsram) {
-        // Try half res
-        jpgScale = JPG_SCALE_2X;
-        decodeW = fb->width / 2;
-        decodeH = fb->height / 2;
-        stampScale = 2;
-        needed = decodeW * decodeH * 2;
-        Serial.printf("Full-res too large, trying 2X: %dx%d (%d bytes)\n", decodeW, decodeH, needed);
-      }
-      if (needed * 1.5 > freePsram) {
-        // Try quarter res
-        jpgScale = JPG_SCALE_4X;
-        decodeW = fb->width / 4;
-        decodeH = fb->height / 4;
-        stampScale = 1;
-        needed = decodeW * decodeH * 2;
-        Serial.printf("2X too large, trying 4X: %dx%d (%d bytes)\n", decodeW, decodeH, needed);
-      }
-      if (needed * 1.5 > freePsram) {
-        Serial.println("Not enough PSRAM even for 4X, skipping stamp");
+      if (writeOk) {
+        Serial.printf("SUCCESS: Saved %s (%d bytes)\n", filename, fb->len);
+        (*photoCounterPtr)++;
       } else {
-        size_t rgbSize = decodeW * decodeH * 2;
-        uint16_t* rgbBuf = (uint16_t*)ps_malloc(rgbSize);
-        
-        if (rgbBuf) {
-          Serial.printf("Decoding at %dx%d (scale %s)...\n", decodeW, decodeH,
-                        jpgScale == JPG_SCALE_NONE ? "1:1" : jpgScale == JPG_SCALE_2X ? "1:2" : "1:4");
-          yield();
-          bool decoded = jpg2rgb565(fb->buf, fb->len, (uint8_t*)rgbBuf, jpgScale);
-          yield();
-          
-          if (decoded) {
-            // Fix byte order: jpg2rgb565 = big-endian, fmt2jpg = little-endian
-            // Process in chunks to feed watchdog
-            int totalPixels = decodeW * decodeH;
-            for (int i = 0; i < totalPixels; i += 32768) {
-              int end = (i + 32768 < totalPixels) ? i + 32768 : totalPixels;
-              for (int j = i; j < end; j++) {
-                rgbBuf[j] = (rgbBuf[j] >> 8) | (rgbBuf[j] << 8);
-              }
-              yield();
-            }
-            
-            // Burn visible timestamp at bottom-right
-            char stamp[22];
-            DateTime dt = rtc->now();
-            snprintf(stamp, sizeof(stamp), "%02d/%02d/%04d %02d:%02d:%02d",
-                     dt.day(), dt.month(), dt.year(),
-                     dt.hour(), dt.minute(), dt.second());
-            
-            int textW = strlen(stamp) * 4 * stampScale;
-            int textH = 5 * stampScale;
-            int tx = decodeW - textW - 8;
-            int ty = decodeH - textH - 8;
-            RTCHandler::drawTimestampOnRGB565Scaled(rgbBuf, decodeW, decodeH,
-                                                    tx, ty, stamp, stampScale);
-            
-            Serial.printf("Re-encoding %dx%d JPEG...\n", decodeW, decodeH);
-            yield();
-            
-            uint8_t* jpgBuf = NULL;
-            size_t jpgLen = 0;
-            bool encoded = fmt2jpg((uint8_t*)rgbBuf, rgbSize, decodeW, decodeH,
-                                    PIXFORMAT_RGB565, 10, &jpgBuf, &jpgLen);
-            free(rgbBuf);
-            rgbBuf = NULL;
-            yield();
-            
-            if (encoded && jpgBuf && jpgLen > 0) {
-              Serial.printf("Stamped JPEG: %d bytes, saving with EXIF...\n", jpgLen);
-              
-              File file = SD_MMC.open(filename, FILE_WRITE);
-              if (file) {
-                bool writeOk = writeJpegWithExif(file, jpgBuf, jpgLen, exifDateTime);
-                file.close();
-                delay(50);
-                
-                if (writeOk) {
-                  Serial.printf("SUCCESS: Saved %s with stamp+EXIF\n", filename);
-                  (*photoCounterPtr)++;
-                  savedWithStamp = true;
-                }
-              }
-              free(jpgBuf);
-            } else {
-              Serial.println("Re-encode failed, falling back");
-              if (jpgBuf) free(jpgBuf);
-            }
-          } else {
-            free(rgbBuf);
-            Serial.println("Decode failed, falling back");
-          }
-        } else {
-          Serial.println("PSRAM alloc failed despite check");
-        }
-      }
-    }
-    
-    // Fallback: save original JPEG with EXIF DateTime (no visible stamp)
-    if (!savedWithStamp) {
-      Serial.printf("Saving original to %s with EXIF...\n", filename);
-      File file = SD_MMC.open(filename, FILE_WRITE);
-      if (file) {
-        bool writeOk = writeJpegWithExif(file, fb->buf, fb->len, exifDateTime);
-        file.close();
-        delay(50);
-        
-        if (writeOk) {
-          Serial.printf("SUCCESS: Saved %s\n", filename);
-          (*photoCounterPtr)++;
-        } else {
-          Serial.println("Write failed!");
-          esp_camera_fb_return(fb);
-          return false;
-        }
-      } else {
-        Serial.println("Failed to open file!");
+        Serial.println("Write failed!");
         esp_camera_fb_return(fb);
         return false;
       }
+    } else {
+      Serial.println("Failed to open file!");
+      esp_camera_fb_return(fb);
+      return false;
     }
     
     esp_camera_fb_return(fb);
