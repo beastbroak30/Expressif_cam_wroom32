@@ -169,107 +169,215 @@ public:
     return true;
   }
   
-  // Build EXIF APP1 segment with all mandatory tags for Windows "Date taken"
-  // Includes: ExifVersion, ColorSpace, DateTimeOriginal, DateTimeDigitized
-  // Returns allocated buffer (caller must free) and sets segLen
-  // EXIF DateTime format: "YYYY:MM:DD HH:MM:SS\0" (20 bytes)
-  static uint8_t* buildExifSegment(const char* dateTime, size_t& segLen) {
-    // Layout (T+ = offset from TIFF header at segment byte 10):
-    // Bytes 0-1: APP1 marker (0xFFE1)
-    // Bytes 2-3: APP1 length (big-endian)
-    // Bytes 4-9: "Exif\0\0"
-    // T+0 (byte 10): TIFF header (8 bytes)
-    // T+8 (byte 18): IFD0: count(2) + 2 entries(24) + next(4) = 30 bytes
-    // T+38 (byte 48): DateTime string (20 bytes)
-    // T+58 (byte 68): SubIFD: count(2) + 4 entries(48) + next(4) = 54 bytes
-    // T+112 (byte 122): DateTimeOriginal string (20 bytes)
-    // T+132 (byte 142): DateTimeDigitized string (20 bytes)
-    // Total: 162 bytes
+  // Helper: write 16-bit little-endian
+  static void writeU16(uint8_t* p, uint16_t v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
+  // Helper: write 32-bit little-endian
+  static void writeU32(uint8_t* p, uint32_t v) { 
+    p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; 
+    p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF; 
+  }
+  // Helper: write IFD entry (12 bytes)
+  static void writeIFDEntry(uint8_t* p, uint16_t tag, uint16_t type, uint32_t count, uint32_t valOrOff) {
+    writeU16(p, tag);
+    writeU16(p + 2, type);
+    writeU32(p + 4, count);
+    writeU32(p + 8, valOrOff);
+  }
 
-    segLen = 162;
+  // Build comprehensive EXIF APP1 segment with full camera metadata
+  // Includes: Make, Model, Artist, Copyright, DateTime, Camera specs, SubSecTime
+  // Author: beastbroak30 | Camera: ESP32-CAM AI-Thinker with OV2640
+  static uint8_t* buildExifSegment(const char* dateTime, size_t& segLen, 
+                                    uint16_t imgWidth = 1280, uint16_t imgHeight = 1024,
+                                    uint16_t subsecMs = 0) {
+    // String pool (null-terminated)
+    const char* strMake       = "Espressif Systems";                    // 18 bytes
+    const char* strModel      = "ESP32-CAM AI-Thinker (OV2640)";        // 30 bytes
+    const char* strSoftware   = "github.com/beastbroak30";              // 24 bytes
+    const char* strArtist     = "beastbroak30";                         // 13 bytes
+    const char* strCopyright  = "CC BY-NC 4.0 beastbroak30";            // 26 bytes
+    const char* strLensMake   = "OmniVision";                           // 11 bytes
+    const char* strLensModel  = "OV2640 1/4\" CMOS";                    // 17 bytes
+    
+    size_t lenMake      = strlen(strMake) + 1;       // 18
+    size_t lenModel     = strlen(strModel) + 1;      // 30
+    size_t lenSoftware  = strlen(strSoftware) + 1;   // 24
+    size_t lenArtist    = strlen(strArtist) + 1;     // 13
+    size_t lenCopyright = strlen(strCopyright) + 1;  // 26
+    size_t lenLensMake  = strlen(strLensMake) + 1;   // 11
+    size_t lenLensModel = strlen(strLensModel) + 1;  // 17
+    
+    // SubSec string "XXX\0" (4 bytes, 3 digits)
+    char strSubSec[4];
+    snprintf(strSubSec, sizeof(strSubSec), "%03d", subsecMs % 1000);
+    size_t lenSubSec = 4;
+
+    // Layout calculation (T+ = offset from TIFF header start at byte 10)
+    // APP1: marker(2) + length(2) + "Exif\0\0"(6) = 10 bytes header
+    // TIFF header: T+0, 8 bytes
+    // IFD0: T+8, 7 entries -> 2 + 7*12 + 4 = 90 bytes (ends at T+98)
+    // IFD0 Data area starts at T+98
+    // Exif SubIFD: variable position
+    // SubIFD Data area: after SubIFD
+
+    const int IFD0_ENTRIES = 7;  // Make, Model, Software, DateTime, Artist, Copyright, ExifIFD
+    const int SUBIFD_ENTRIES = 14;  // Full camera metadata
+
+    // Calculate IFD0 size
+    size_t ifd0Size = 2 + IFD0_ENTRIES * 12 + 4;  // count + entries + next IFD ptr
+    uint32_t ifd0DataStart = 8 + ifd0Size;  // T+98
+
+    // IFD0 data area: strings that don't fit inline (>4 bytes)
+    uint32_t offMake      = ifd0DataStart;                           // T+98
+    uint32_t offModel     = offMake + lenMake;                       // T+116
+    uint32_t offSoftware  = offModel + lenModel;                     // T+146
+    uint32_t offDateTime  = offSoftware + lenSoftware;               // T+170
+    uint32_t offArtist    = offDateTime + 20;                        // T+190
+    uint32_t offCopyright = offArtist + lenArtist;                   // T+203
+    uint32_t subIfdStart  = offCopyright + lenCopyright;             // T+229
+
+    // Exif SubIFD
+    size_t subIfdSize = 2 + SUBIFD_ENTRIES * 12 + 4;  // 2 + 168 + 4 = 174 bytes
+    uint32_t subIfdDataStart = subIfdStart + subIfdSize;  // T+403
+
+    // SubIFD data area
+    uint32_t offDateTimeOrig = subIfdDataStart;                      // T+403
+    uint32_t offDateTimeDig  = offDateTimeOrig + 20;                 // T+423
+    uint32_t offSubSecOrig   = offDateTimeDig + 20;                  // T+443
+    uint32_t offSubSecDig    = offSubSecOrig + lenSubSec;            // T+447
+    uint32_t offExposure     = offSubSecDig + lenSubSec;             // T+451 (RATIONAL = 8 bytes)
+    uint32_t offFNumber      = offExposure + 8;                      // T+459
+    uint32_t offFocalLen     = offFNumber + 8;                       // T+467
+    uint32_t offLensMake     = offFocalLen + 8;                      // T+475
+    uint32_t offLensModel    = offLensMake + lenLensMake;            // T+486
+    uint32_t totalTiffSize   = offLensModel + lenLensModel;          // T+503
+
+    // Total segment size
+    segLen = 10 + totalTiffSize;  // 10 header + TIFF data
+    
     uint8_t* s = (uint8_t*)malloc(segLen);
     if (!s) return nullptr;
     memset(s, 0, segLen);
 
     // APP1 marker
     s[0] = 0xFF; s[1] = 0xE1;
-    // APP1 length (big-endian): 162 - 2 = 160 = 0x00A0
-    s[2] = 0x00; s[3] = 0xA0;
+    // APP1 length (big-endian): segLen - 2
+    uint16_t appLen = segLen - 2;
+    s[2] = (appLen >> 8) & 0xFF;
+    s[3] = appLen & 0xFF;
     // Exif\0\0
-    s[4]='E'; s[5]='x'; s[6]='i'; s[7]='f'; s[8]=0; s[9]=0;
+    memcpy(s + 4, "Exif\0\0", 6);
 
     // TIFF header at T+0 (byte 10)
-    s[10]='I'; s[11]='I';           // little-endian
-    s[12]=0x2A; s[13]=0x00;         // magic 42
-    s[14]=0x08; s[15]=0x00; s[16]=0x00; s[17]=0x00; // IFD0 at T+8
-  
-    // IFD0 at T+8 (byte 18): 2 entries
-    s[18]=0x02; s[19]=0x00;
+    uint8_t* T = s + 10;  // TIFF base
+    T[0] = 'I'; T[1] = 'I';           // little-endian
+    writeU16(T + 2, 0x002A);          // magic 42
+    writeU32(T + 4, 8);               // IFD0 at T+8
+
+    // IFD0 at T+8
+    uint8_t* ifd0 = T + 8;
+    writeU16(ifd0, IFD0_ENTRIES);
+    uint8_t* entry = ifd0 + 2;
+
+    // IFD0 entries (must be in ascending tag order!)
+    // 0x010F Make
+    writeIFDEntry(entry, 0x010F, 2, lenMake, offMake); entry += 12;
+    // 0x0110 Model
+    writeIFDEntry(entry, 0x0110, 2, lenModel, offModel); entry += 12;
+    // 0x0131 Software
+    writeIFDEntry(entry, 0x0131, 2, lenSoftware, offSoftware); entry += 12;
+    // 0x0132 DateTime
+    writeIFDEntry(entry, 0x0132, 2, 20, offDateTime); entry += 12;
+    // 0x013B Artist
+    writeIFDEntry(entry, 0x013B, 2, lenArtist, offArtist); entry += 12;
+    // 0x8298 Copyright
+    writeIFDEntry(entry, 0x8298, 2, lenCopyright, offCopyright); entry += 12;
+    // 0x8769 ExifIFD pointer
+    writeIFDEntry(entry, 0x8769, 4, 1, subIfdStart); entry += 12;
+    // Next IFD = 0 (already zeroed)
+
+    // IFD0 data area
+    memcpy(T + offMake, strMake, lenMake);
+    memcpy(T + offModel, strModel, lenModel);
+    memcpy(T + offSoftware, strSoftware, lenSoftware);
+    memcpy(T + offDateTime, dateTime, 20);
+    memcpy(T + offArtist, strArtist, lenArtist);
+    memcpy(T + offCopyright, strCopyright, lenCopyright);
+
+    // Exif SubIFD at subIfdStart
+    uint8_t* subIfd = T + subIfdStart;
+    writeU16(subIfd, SUBIFD_ENTRIES);
+    entry = subIfd + 2;
+
+    // SubIFD entries (ascending tag order!)
+    // 0x829A ExposureTime (RATIONAL) = 1/50 sec (typical indoor)
+    writeIFDEntry(entry, 0x829A, 5, 1, offExposure); entry += 12;
+    // 0x829D FNumber (RATIONAL) = f/2.0 (OV2640 fixed aperture)
+    writeIFDEntry(entry, 0x829D, 5, 1, offFNumber); entry += 12;
+    // 0x8827 ISOSpeedRatings (SHORT) = 100 (inline)
+    writeIFDEntry(entry, 0x8827, 3, 1, 100); entry += 12;
+    // 0x9000 ExifVersion (UNDEFINED) = "0230" (inline)
+    entry[0] = 0x00; entry[1] = 0x90; entry[2] = 0x07; entry[3] = 0x00;
+    entry[4] = 0x04; entry[5] = 0x00; entry[6] = 0x00; entry[7] = 0x00;
+    entry[8] = '0'; entry[9] = '2'; entry[10] = '3'; entry[11] = '0';
+    entry += 12;
+    // 0x9003 DateTimeOriginal
+    writeIFDEntry(entry, 0x9003, 2, 20, offDateTimeOrig); entry += 12;
+    // 0x9004 DateTimeDigitized
+    writeIFDEntry(entry, 0x9004, 2, 20, offDateTimeDig); entry += 12;
+    // 0x9291 SubSecTimeOriginal
+    writeIFDEntry(entry, 0x9291, 2, lenSubSec, offSubSecOrig); entry += 12;
+    // 0x9292 SubSecTimeDigitized
+    writeIFDEntry(entry, 0x9292, 2, lenSubSec, offSubSecDig); entry += 12;
+    // 0x920A FocalLength (RATIONAL) = 2.8mm
+    writeIFDEntry(entry, 0x920A, 5, 1, offFocalLen); entry += 12;
+    // 0xA001 ColorSpace (SHORT) = 1 (sRGB)
+    writeIFDEntry(entry, 0xA001, 3, 1, 1); entry += 12;
+    // 0xA002 PixelXDimension (LONG) - inline
+    writeIFDEntry(entry, 0xA002, 4, 1, imgWidth); entry += 12;
+    // 0xA003 PixelYDimension (LONG) - inline
+    writeIFDEntry(entry, 0xA003, 4, 1, imgHeight); entry += 12;
+    // 0xA433 LensMake
+    writeIFDEntry(entry, 0xA433, 2, lenLensMake, offLensMake); entry += 12;
+    // 0xA434 LensModel
+    writeIFDEntry(entry, 0xA434, 2, lenLensModel, offLensModel); entry += 12;
+    // Next IFD = 0 (already zeroed)
+
+    // SubIFD data area
+    memcpy(T + offDateTimeOrig, dateTime, 20);
+    memcpy(T + offDateTimeDig, dateTime, 20);
+    memcpy(T + offSubSecOrig, strSubSec, lenSubSec);
+    memcpy(T + offSubSecDig, strSubSec, lenSubSec);
     
-    // IFD0 Entry 1: DateTime (0x0132), ASCII, count=20, offset=T+38
-    s[20]=0x32; s[21]=0x01;         // tag 0x0132
-    s[22]=0x02; s[23]=0x00;         // type: ASCII
-    s[24]=0x14; s[25]=0x00; s[26]=0x00; s[27]=0x00; // count: 20
-    s[28]=0x26; s[29]=0x00; s[30]=0x00; s[31]=0x00; // offset: T+38 = 0x26
-
-    // IFD0 Entry 2: ExifIFD pointer (0x8769), LONG, count=1, value=T+58
-    s[32]=0x69; s[33]=0x87;         // tag 0x8769
-    s[34]=0x04; s[35]=0x00;         // type: LONG
-    s[36]=0x01; s[37]=0x00; s[38]=0x00; s[39]=0x00; // count: 1
-    s[40]=0x3A; s[41]=0x00; s[42]=0x00; s[43]=0x00; // value: T+58 = 0x3A
-
-    // Next IFD: none (bytes 44-47 = 0)
-
-    // DateTime value at T+38 (byte 48), 20 bytes
-    memcpy(s + 48, dateTime, 20);
-
-    // Exif SubIFD at T+58 (byte 68): 4 entries (sorted by tag!)
-    s[68]=0x04; s[69]=0x00;
-
-    // SubIFD Entry 1: ExifVersion (0x9000), UNDEFINED, count=4, value="0220" inline
-    s[70]=0x00; s[71]=0x90;         // tag 0x9000
-    s[72]=0x07; s[73]=0x00;         // type: UNDEFINED
-    s[74]=0x04; s[75]=0x00; s[76]=0x00; s[77]=0x00; // count: 4
-    s[78]='0'; s[79]='2'; s[80]='2'; s[81]='0';     // value inline
-
-    // SubIFD Entry 2: DateTimeOriginal (0x9003), ASCII, count=20, offset=T+112
-    s[82]=0x03; s[83]=0x90;         // tag 0x9003
-    s[84]=0x02; s[85]=0x00;         // type: ASCII
-    s[86]=0x14; s[87]=0x00; s[88]=0x00; s[89]=0x00; // count: 20
-    s[90]=0x70; s[91]=0x00; s[92]=0x00; s[93]=0x00; // offset: T+112 = 0x70
-
-    // SubIFD Entry 3: DateTimeDigitized (0x9004), ASCII, count=20, offset=T+132
-    s[94]=0x04; s[95]=0x90;         // tag 0x9004
-    s[96]=0x02; s[97]=0x00;         // type: ASCII
-    s[98]=0x14; s[99]=0x00; s[100]=0x00; s[101]=0x00; // count: 20
-    s[102]=0x84; s[103]=0x00; s[104]=0x00; s[105]=0x00; // offset: T+132 = 0x84
-
-    // SubIFD Entry 4: ColorSpace (0xA001), SHORT, count=1, value=1 (sRGB) inline
-    s[106]=0x01; s[107]=0xA0;       // tag 0xA001
-    s[108]=0x03; s[109]=0x00;       // type: SHORT
-    s[110]=0x01; s[111]=0x00; s[112]=0x00; s[113]=0x00; // count: 1
-    s[114]=0x01; s[115]=0x00; s[116]=0x00; s[117]=0x00; // value: 1 (sRGB)
-
-    // Next IFD: none (bytes 118-121 = 0)
-
-    // DateTimeOriginal at T+112 (byte 122), 20 bytes
-    memcpy(s + 122, dateTime, 20);
-
-    // DateTimeDigitized at T+132 (byte 142), 20 bytes
-    memcpy(s + 142, dateTime, 20);
+    // RATIONAL values: numerator(4) + denominator(4)
+    // ExposureTime = 1/50
+    writeU32(T + offExposure, 1);
+    writeU32(T + offExposure + 4, 50);
+    // FNumber = 2.0 = 20/10
+    writeU32(T + offFNumber, 20);
+    writeU32(T + offFNumber + 4, 10);
+    // FocalLength = 2.8mm = 28/10
+    writeU32(T + offFocalLen, 28);
+    writeU32(T + offFocalLen + 4, 10);
+    
+    // Lens strings
+    memcpy(T + offLensMake, strLensMake, lenLensMake);
+    memcpy(T + offLensModel, strLensModel, lenLensModel);
 
     return s;
   }
   
   // Write JPEG with EXIF injected: SOI + EXIF APP1 + rest of JPEG (skip original SOI)
-  bool writeJpegWithExif(File& file, const uint8_t* jpgData, size_t jpgLen, const char* exifDateTime) {
+  bool writeJpegWithExif(File& file, const uint8_t* jpgData, size_t jpgLen, 
+                         const char* exifDateTime, uint16_t imgWidth, uint16_t imgHeight,
+                         uint16_t subsecMs = 0) {
     // Write SOI marker
     const uint8_t soi[] = {0xFF, 0xD8};
     file.write(soi, 2);
     
-    // Build and write EXIF segment
+    // Build and write comprehensive EXIF segment
     size_t exifLen = 0;
-    uint8_t* exifSeg = buildExifSegment(exifDateTime, exifLen);
+    uint8_t* exifSeg = buildExifSegment(exifDateTime, exifLen, imgWidth, imgHeight, subsecMs);
     if (exifSeg) {
       file.write(exifSeg, exifLen);
       free(exifSeg);
@@ -339,12 +447,17 @@ public:
     
     // Build EXIF DateTime string: "YYYY:MM:DD HH:MM:SS\0" (exactly 20 bytes)
     char exifDateTime[20] = "2000:01:01 00:00:00";
+    uint16_t subsecMs = (uint16_t)(millis() % 1000);  // Capture subsecond for precision
     if (rtc && rtc->isAvailable()) {
       DateTime dt = rtc->now();
       snprintf(exifDateTime, sizeof(exifDateTime), "%04d:%02d:%02d %02d:%02d:%02d",
                dt.year(), dt.month(), dt.day(),
                dt.hour(), dt.minute(), dt.second());
     }
+    
+    // Store image dimensions for EXIF
+    uint16_t imgWidth = fb->width;
+    uint16_t imgHeight = fb->height;
     
     // Build filename with timestamp if RTC available
     char filename[48];
@@ -380,7 +493,7 @@ public:
     Serial.printf("Saving to %s with EXIF timestamp...\n", filename);
     File file = SD_MMC.open(filename, FILE_WRITE);
     if (file) {
-      bool writeOk = writeJpegWithExif(file, fb->buf, fb->len, exifDateTime);
+      bool writeOk = writeJpegWithExif(file, fb->buf, fb->len, exifDateTime, imgWidth, imgHeight, subsecMs);
       file.close();
       delay(50);
       
