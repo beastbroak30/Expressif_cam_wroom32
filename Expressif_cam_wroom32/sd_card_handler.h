@@ -169,46 +169,84 @@ public:
     return true;
   }
   
-  // Build a minimal EXIF APP1 segment with DateTime tag
-  // Returns allocated buffer (caller must free) and sets len
+  // Build EXIF APP1 segment with DateTime, DateTimeOriginal, DateTimeDigitized
+  // Windows/macOS "Date taken" requires DateTimeOriginal (0x9003) in Exif SubIFD
+  // Returns allocated buffer (caller must free) and sets segLen
   // EXIF DateTime format: "YYYY:MM:DD HH:MM:SS\0" (20 bytes)
   static uint8_t* buildExifSegment(const char* dateTime, size_t& segLen) {
-    // Minimal EXIF: APP1 marker + Exif header + TIFF header + IFD0 with DateTime
-    // TIFF is little-endian (II)
-    static const uint8_t exifTemplate[] = {
-      0xFF, 0xE1,       // APP1 marker
-      0x00, 0x00,       // Length placeholder (filled below)
-      'E','x','i','f',0x00,0x00, // Exif header
-      // TIFF header (offset 10 from APP1 data start)
-      'I','I',          // Little-endian
-      0x2A, 0x00,       // TIFF magic
-      0x08, 0x00, 0x00, 0x00, // Offset to IFD0 (8 bytes from TIFF start)
-      // IFD0 (offset 8 from TIFF start)
-      0x01, 0x00,       // 1 entry
-      // Entry: DateTime (tag 0x0132)
-      0x32, 0x01,       // Tag: DateTime
-      0x02, 0x00,       // Type: ASCII
-      0x14, 0x00, 0x00, 0x00, // Count: 20 bytes
-      0x1A, 0x00, 0x00, 0x00, // Offset to value (26 from TIFF start)
-      0x00, 0x00, 0x00, 0x00, // Next IFD: none
-      // DateTime value starts here (offset 26 from TIFF)
-      // 20 bytes of datetime string filled below
-    };
-    
-    segLen = sizeof(exifTemplate) + 20; // template + datetime string
-    uint8_t* seg = (uint8_t*)malloc(segLen);
-    if (!seg) return nullptr;
-    
-    memcpy(seg, exifTemplate, sizeof(exifTemplate));
-    // Copy datetime string (20 bytes including null)
-    memcpy(seg + sizeof(exifTemplate), dateTime, 20);
-    
-    // Fill APP1 length (everything after the 2-byte marker)
-    uint16_t app1Len = segLen - 2;
-    seg[2] = (app1Len >> 8) & 0xFF;
-    seg[3] = app1Len & 0xFF;
-    
-    return seg;
+    // Layout (all offsets T+ are from TIFF header start at segment byte 10):
+    // Segment bytes 0-1:   APP1 marker (0xFFE1)
+    // Segment bytes 2-3:   APP1 length (big-endian)
+    // Segment bytes 4-9:   "Exif\0\0"
+    // T+0  (byte 10):  TIFF header "II" + magic 42 + IFD0 offset
+    // T+8  (byte 18):  IFD0: 2 entries (DateTime + ExifIFD pointer)
+    // T+38 (byte 48):  DateTime value (20 bytes)
+    // T+58 (byte 68):  Exif SubIFD: 2 entries (DateTimeOriginal + DateTimeDigitized)
+    // T+88 (byte 98):  DateTimeOriginal value (20 bytes)
+    // T+108(byte 118): DateTimeDigitized value (20 bytes)
+    // Total: 138 bytes
+
+    segLen = 138;
+    uint8_t* s = (uint8_t*)malloc(segLen);
+    if (!s) return nullptr;
+    memset(s, 0, segLen);
+
+    // APP1 marker
+    s[0] = 0xFF; s[1] = 0xE1;
+    // APP1 length (big-endian): 138 - 2 = 136 = 0x0088
+    s[2] = 0x00; s[3] = 0x88;
+    // Exif\0\0
+    s[4]='E'; s[5]='x'; s[6]='i'; s[7]='f'; s[8]=0; s[9]=0;
+
+    // TIFF header at T+0 (byte 10)
+    s[10]='I'; s[11]='I';           // little-endian
+    s[12]=0x2A; s[13]=0x00;         // magic 42
+    s[14]=0x08; s[15]=0x00; s[16]=0x00; s[17]=0x00; // IFD0 at T+8
+
+    // IFD0 at T+8 (byte 18): 2 entries
+    s[18]=0x02; s[19]=0x00;
+
+    // IFD0 Entry 1: DateTime (0x0132), ASCII, count=20, value at T+38
+    s[20]=0x32; s[21]=0x01;         // tag
+    s[22]=0x02; s[23]=0x00;         // type: ASCII
+    s[24]=0x14; s[25]=0x00; s[26]=0x00; s[27]=0x00; // count: 20
+    s[28]=0x26; s[29]=0x00; s[30]=0x00; s[31]=0x00; // offset: T+38
+
+    // IFD0 Entry 2: ExifIFD pointer (0x8769), LONG, count=1, value=T+58
+    s[32]=0x69; s[33]=0x87;         // tag
+    s[34]=0x04; s[35]=0x00;         // type: LONG
+    s[36]=0x01; s[37]=0x00; s[38]=0x00; s[39]=0x00; // count: 1
+    s[40]=0x3A; s[41]=0x00; s[42]=0x00; s[43]=0x00; // value: T+58
+
+    // Next IFD: none (bytes 44-47 already 0)
+
+    // DateTime value at T+38 (byte 48)
+    memcpy(s + 48, dateTime, 20);
+
+    // Exif SubIFD at T+58 (byte 68): 2 entries
+    s[68]=0x02; s[69]=0x00;
+
+    // SubIFD Entry 1: DateTimeOriginal (0x9003), ASCII, count=20, offset=T+88
+    s[70]=0x03; s[71]=0x90;         // tag
+    s[72]=0x02; s[73]=0x00;         // type: ASCII
+    s[74]=0x14; s[75]=0x00; s[76]=0x00; s[77]=0x00; // count: 20
+    s[78]=0x58; s[79]=0x00; s[80]=0x00; s[81]=0x00; // offset: T+88
+
+    // SubIFD Entry 2: DateTimeDigitized (0x9004), ASCII, count=20, offset=T+108
+    s[82]=0x04; s[83]=0x90;         // tag
+    s[84]=0x02; s[85]=0x00;         // type: ASCII
+    s[86]=0x14; s[87]=0x00; s[88]=0x00; s[89]=0x00; // count: 20
+    s[90]=0x6C; s[91]=0x00; s[92]=0x00; s[93]=0x00; // offset: T+108
+
+    // Next IFD: none (bytes 94-97 already 0)
+
+    // DateTimeOriginal value at T+88 (byte 98)
+    memcpy(s + 98, dateTime, 20);
+
+    // DateTimeDigitized value at T+108 (byte 118)
+    memcpy(s + 118, dateTime, 20);
+
+    return s;
   }
   
   // Write JPEG with EXIF injected: SOI + EXIF APP1 + rest of JPEG (skip original SOI)
