@@ -1,132 +1,93 @@
 /*
   ESP32-CAM Photo Capture with ST7735 TFT Display
-  - Live Preview: QVGA (320x240) RGB565 downsampled to 128x96 (full frame, no crop)
+  - Live Preview: QVGA (320x240) RGB565 downsampled to 120x160 (90° rotated)
   - Photo Capture: SXGA (1280x1024) JPEG - best quality
   - Dual-core async operation for smooth preview
   - Button triggered photo save to SD card
-  - Flash effect and status display
-  - Linux-style boot sequence
+  - Horizontal HUD with wave visualization
+  - SD card boot test with write/delete verification
   - Modular architecture with improved color accuracy
+  
+  Author: beastbroak30
 */
 // powershell -ExecutionPolicy Bypass -File build-and-upload-ota.ps1
-#define CAMERA_MODEL_AI_THINKER
 
+// === Configuration ===
+#include "config.h"         // Centralized pins and constants
+#include "secrets.h"        // WiFi credentials
+
+// === System Libraries ===
 #include "img_converters.h"
 #include "esp_camera.h"
 #include "camera_pins.h"
-#include "SD_MMC.h"  // SD card - temporarily enabled during save only
-#include "FS.h"      // File system for SD card
+#include "SD_MMC.h"
+#include "FS.h"
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
-#include <Preferences.h>  // For NVS storage management
-#include <nvs_flash.h>  
-#include "secrets.h"  // For low-level NVS operations
+#include <Preferences.h>
+#include <nvs_flash.h>
 
-// Custom modules for better organization and improved color handling
+// === Custom Modules ===
 #include "camera_settings.h"
 #include "sd_card_handler.h"
 #include "rtc_handler.h"
 #include "camera_hud.h"
 
-#include <Adafruit_GFX.h>    // Core graphics library
-#include <Adafruit_ST7735.h> // Hardware-specific library for ST7735
+// === Display Library ===
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 
-#define TFT_SCLK 14 // SCL
-#define TFT_MOSI 13 // SDA
-#define TFT_RST  12 // RES (RESET)
-#define TFT_DC    2 // Data Command control pin
-#define TFT_CS   15 // Chip select control pin
-                    // BL (back light) and VCC -> 3V3
-
-#define BTN       4 // button (shared with flash led)
-
-// Display dimensions - adjust to your ST7735 variant
-// Common sizes: 128x128, 128x160, 160x128
-#define DISPLAY_WIDTH  128
-#define DISPLAY_HEIGHT 160
-
-// For live video: QVGA (320x240) displayed on 128x160 TFT
-// We'll downsample to fit full image (preserves aspect ratio)
-#define CAMERA_WIDTH   320
-#define CAMERA_HEIGHT  240
-
-// Downsampled dimensions for TFT with 90° CW rotation
-// 320x240 -> downsample to 160x120 -> rotate 90° CW -> 120x160 on display
-#define DOWNSAMPLE_WIDTH  160   // Pre-rotation intermediate width
-#define DOWNSAMPLE_HEIGHT 120   // Pre-rotation intermediate height
-#define DISPLAY_SCALED_WIDTH  120  // After rotation: fits 128-wide display
-#define DISPLAY_SCALED_HEIGHT 160  // After rotation: fills 160-tall display
-#define DISPLAY_X_OFFSET      4    // Center horizontally: (128 - 120) / 2
-#define DISPLAY_Y_OFFSET      0    // No vertical offset — fills full height
-
-// For photo mode: SXGA (1280x1024) - best quality for ESP32-CAM
-#define PHOTO_WIDTH    1280
-#define PHOTO_HEIGHT   1024
-
-// Live video mode settings
-constexpr bool LIVE_VIDEO_MODE = true;  // true = live feed, false = button capture only
+// === Runtime State ===
 bool sdCardMounted = false;
-volatile bool freezeFrame = false;  // When true, freeze the current frame
+volatile bool freezeFrame = false;
 unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
 float currentFps = 0.0f;
 
-// Dual-core processing
+// === Dual-core Processing ===
 TaskHandle_t cameraTaskHandle = NULL;
 volatile bool newFrameReady = false;
 volatile bool frameBeingDisplayed = false;
-volatile bool cameraPaused = false;  // Pause camera task during SD operations
-uint16_t *displayBuffer = NULL;  // Pre-processed frame buffer for display
+volatile bool cameraPaused = false;
+uint16_t *displayBuffer = NULL;
 SemaphoreHandle_t frameMutex = NULL;
 
-// Photo saving
+// === Photo Saving ===
 unsigned int photoCounter = 0;
-volatile bool saveRequested = false;  // Flag to request photo save from main loop
+volatile bool saveRequested = false;
 
-// RTC
+// === Hardware Objects ===
 RTCHandler rtcHandler;
-
-// HUD overlay
 CameraHUD cameraHUD;
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
 
-// Boot log settings
-#define BOOT_LINE_HEIGHT 10
-#define BOOT_START_Y     4
-#define BOOT_START_X     2
-
-constexpr bool OTA_ENABLED = true;
+// === WiFi/OTA Settings ===
 const char* ssid     = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
-const char* OTA_HOSTNAME = "KANCAM";
 IPAddress WIFI_LOCAL_IP(192, 168, 1, 51);
 IPAddress WIFI_GATEWAY(192, 168, 1, 1);
 IPAddress WIFI_SUBNET(255, 255, 255, 0);
 
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCLK, TFT_RST);
-
+// === UI State ===
 volatile bool photoDisplayed = false;
 volatile bool buttonPressed = false;
-volatile bool buttonInterruptFlag = false;  // Set by ISR, cleared by main loop
+volatile bool buttonInterruptFlag = false;
 unsigned int otaLastPercentShown = 101;
-unsigned long lastButtonTime = 0;  // For debouncing
+unsigned long lastButtonTime = 0;
+int bootLine = 0;
+uint8_t *videoBuffer = NULL;
 
-// Button interrupt handler (IRAM for speed)
+// === Button ISR ===
 void IRAM_ATTR buttonISR() {
   unsigned long now = millis();
-  if (now - lastButtonTime > 200) {  // 200ms debounce
+  if (now - lastButtonTime > 200) {
     buttonInterruptFlag = true;
     lastButtonTime = now;
   }
 }
 
-// RGB565 buffer for live video (allocated in setup)
-uint8_t *videoBuffer = NULL;
-
-// Boot sequence variables
-int bootLine = 0;
-
-// Function declarations
+// === Function Declarations ===
 void clearPersistentStorage();
 void bootLog(const char* message, bool newLine = true);
 void bootLogStatus(const char* status, uint16_t color);
