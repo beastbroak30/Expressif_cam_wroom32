@@ -32,6 +32,43 @@ public:
     return true;
   }
   
+  // Test SD card with write/delete (call during boot to verify card health)
+  // Returns true if SD card is working properly
+  bool testWriteDelete() {
+    if (!isMounted) {
+      Serial.println("SD card not mounted for test");
+      return false;
+    }
+    
+    const char* testFile = "/_sdtest.txt";
+    const char* testData = "ESP32-CAM SD Test";
+    
+    // Try to write test file
+    File file = SD_MMC.open(testFile, FILE_WRITE);
+    if (!file) {
+      Serial.println("SD test: Failed to create test file");
+      return false;
+    }
+    
+    size_t written = file.print(testData);
+    file.close();
+    
+    if (written != strlen(testData)) {
+      Serial.println("SD test: Write verification failed");
+      SD_MMC.remove(testFile);
+      return false;
+    }
+    
+    // Delete test file
+    if (!SD_MMC.remove(testFile)) {
+      Serial.println("SD test: Failed to delete test file");
+      return false;
+    }
+    
+    Serial.println("SD test: Write/delete OK");
+    return true;
+  }
+  
   // Scan SD card and find next available photo number
   // This prevents overwriting existing photos
   unsigned int findNextPhotoNumber() {
@@ -155,12 +192,25 @@ public:
       return false;
     }
     
-    // Write JPEG data
-    size_t written = file.write(fb->buf, fb->len);
+    // Write JPEG data using 8KB chunks for optimal SD speed
+    const size_t chunkSize = 8192;
+    size_t offset = 0;
+    size_t totalWritten = 0;
+    while (offset < fb->len) {
+      size_t toWrite = ((fb->len - offset) > chunkSize) ? chunkSize : (fb->len - offset);
+      size_t written = file.write(fb->buf + offset, toWrite);
+      if (written != toWrite) {
+        Serial.printf("ERROR: Write failed at offset %d\n", offset);
+        file.close();
+        return false;
+      }
+      totalWritten += written;
+      offset += written;
+    }
     file.close();
     
-    if (written != fb->len) {
-      Serial.printf("ERROR: Only wrote %d of %d bytes\n", written, fb->len);
+    if (totalWritten != fb->len) {
+      Serial.printf("ERROR: Only wrote %d of %d bytes\n", totalWritten, fb->len);
       return false;
     }
     
@@ -384,15 +434,15 @@ public:
     }
     
     // Write rest of JPEG (skip original SOI 0xFFD8)
+    // Use 8KB chunks for faster SD writes (optimal for SD card block alignment)
     size_t offset = 2;
-    const size_t chunkSize = 4096;
+    const size_t chunkSize = 8192;  // 8KB chunks for speed
     bool ok = true;
     while (offset < jpgLen) {
       size_t toWrite = ((jpgLen - offset) > chunkSize) ? chunkSize : (jpgLen - offset);
       size_t written = file.write(jpgData + offset, toWrite);
       if (written != toWrite) { ok = false; break; }
       offset += written;
-      yield();
     }
     return ok;
   }

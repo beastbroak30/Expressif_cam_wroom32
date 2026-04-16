@@ -564,16 +564,37 @@ void setup() {
     bootLog("  No RTC - no timestamps");
   }
 
-  // ===== STEP 11: SD Card (on-demand) =====
-  // SD_MMC uses pins shared with TFT, so we init/deinit only when saving photos
+  // ===== STEP 11: SD Card Test at Boot =====
+  // Init SD, test write/delete, then deinit (same pattern as photo save)
   bootLog("SD Card...", false);
-  sdCardMounted = false;  // Will be mounted on-demand when saving
-  int y = BOOT_START_Y + ((bootLine - 1) * BOOT_LINE_HEIGHT);
-  int x = DISPLAY_WIDTH - (6 * 6) - 2;
-  tft.setCursor(x, y);
-  tft.setTextColor(ST77XX_CYAN);
-  tft.print("[BTN]");
-  Serial.println("[ON-DEMAND]");
+  {
+    SDCardHandler sdTest(&photoCounter);
+    if (sdTest.begin()) {
+      if (sdTest.testWriteDelete()) {
+        sdCardMounted = true;
+        bootLogOK();
+        // Scan for existing photos to set counter
+        sdTest.updateCounterFromExistingPhotos();
+        bootLogValue("  Photos: ", photoCounter, "");
+      } else {
+        bootLogFAIL();
+        bootLog("  Write test failed");
+        sdCardMounted = false;
+      }
+      sdTest.end();
+    } else {
+      bootLogFAIL();
+      bootLog("  No SD card");
+      sdCardMounted = false;
+    }
+  }
+  // Reinit TFT after SD (shared pins)
+  delay(50);
+  tft.initR(INITR_GREENTAB);
+  tft.setRotation(0);
+  // Redraw boot header  
+  tft.fillRect(0, 0, DISPLAY_WIDTH, 14, ST77XX_BLUE);
+  tft_drawtext(8, 3, "ESP32-CAM Boot", 1, ST77XX_WHITE);
 
   // ===== STEP 12: Optional OTA =====
   if (OTA_ENABLED) {
@@ -824,7 +845,7 @@ void displayFrameFromBuffer() {
       }
       
       // Draw DSLR-style HUD overlay
-      cameraHUD.draw(currentFps, dtStr, photoCounter, false);
+      cameraHUD.draw(currentFps, dtStr, photoCounter, sdCardMounted);
     }
   }
 }
