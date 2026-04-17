@@ -192,7 +192,7 @@ The runner registration token is only used once during `./config.sh`. After `svc
 OTA requires the correct partition table to already be on the device. Flash via USB once to set it up:
 
 ```powershell
-.\build-and-upload-ota.ps1 -UsbUpload -UsbPort "COM3"
+.\build-and-upload-ota.ps1 -UsbUpload -UsbPort "COMx"
 ```
 
 After this, all subsequent updates can be done via OTA.
