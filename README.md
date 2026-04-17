@@ -14,6 +14,7 @@
 | Display | ST7735 TFT 128×160 |
 | Storage | MicroSD via SD\_MMC |
 | OTA Flasher | Raspberry Pi Zero 2W (on same LAN) |
+| RTC | DS3231 RealTime Clock Module|
 
 ### Button Configuration
 
