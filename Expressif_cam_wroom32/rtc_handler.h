@@ -3,6 +3,13 @@
 
 #include <Wire.h>
 #include <RTClib.h>
+#include <time.h>  // For NTP sync
+
+// NTP Configuration for IST (India Standard Time = GMT+5:30)
+#define NTP_SERVER1       "pool.ntp.org"
+#define NTP_SERVER2       "time.google.com"
+#define NTP_GMT_OFFSET    19800   // IST = +5:30 = 5*3600 + 30*60 = 19800 seconds
+#define NTP_DAYLIGHT_OFF  0       // India doesn't use DST
 
 // DS3231 RTC Handler
 // Uses GPIO 3 (RX/SDA) and GPIO 1 (TX/SCL) for I2C
@@ -33,9 +40,11 @@ public:
     // Otherwise keep the running time from the DS3231 battery backup
     if (rtc.lostPower()) {
       // __DATE__/__TIME__ are IST when compiled with TZ=Asia/Kolkata in workflow
+      // Add 5 minutes to compensate for compile/upload delay
       DateTime compileTime(F(__DATE__), F(__TIME__));
-      rtc.adjust(compileTime);
-      Serial.println("RTC lost power, set to compile time (IST)");
+      DateTime adjustedTime = compileTime + TimeSpan(0, 0, 5, 0);  // +5 minutes
+      rtc.adjust(adjustedTime);
+      Serial.println("RTC lost power, set to compile time + 5min (IST)");
     } else {
       Serial.println("RTC running from battery backup");
     }
@@ -90,6 +99,45 @@ public:
     snprintf(buf, len, "%04d%02d%02d_%02d%02d%02d",
              dt.year(), dt.month(), dt.day(),
              dt.hour(), dt.minute(), dt.second());
+  }
+
+  // Sync RTC with NTP time (call after WiFi connected)
+  // Returns true if sync successful
+  bool syncWithNTP(unsigned long timeoutMs = 5000) {
+    if (!initialized) return false;
+    
+    Serial.println("Starting NTP sync...");
+    configTime(NTP_GMT_OFFSET, NTP_DAYLIGHT_OFF, NTP_SERVER1, NTP_SERVER2);
+    
+    struct tm timeinfo;
+    unsigned long startMs = millis();
+    
+    // Wait for NTP response
+    while (!getLocalTime(&timeinfo) && (millis() - startMs < timeoutMs)) {
+      delay(100);
+    }
+    
+    if (!getLocalTime(&timeinfo)) {
+      Serial.println("NTP sync failed - timeout");
+      return false;
+    }
+    
+    // Update DS3231 RTC with NTP time
+    DateTime ntpTime(
+      timeinfo.tm_year + 1900,
+      timeinfo.tm_mon + 1,
+      timeinfo.tm_mday,
+      timeinfo.tm_hour,
+      timeinfo.tm_min,
+      timeinfo.tm_sec
+    );
+    
+    rtc.adjust(ntpTime);
+    
+    Serial.printf("RTC synced via NTP: %02d/%02d/%04d %02d:%02d:%02d\n",
+                  timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
+                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    return true;
   }
 };
 

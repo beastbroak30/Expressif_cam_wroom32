@@ -77,6 +77,7 @@ unsigned int otaLastPercentShown = 101;
 unsigned long lastButtonTime = 0;
 int bootLine = 0;
 uint8_t *videoBuffer = NULL;
+bool otaEnabled = false;  // Runtime flag: set by button press at boot
 
 // === Button ISR ===
 void IRAM_ATTR buttonISR() {
@@ -101,6 +102,7 @@ void showOTAProgress(unsigned int progress, unsigned int total);
 const char* otaErrorToText(ota_error_t error);
 void displayLiveFrame();
 void showCameraReady();
+bool waitForOTAButton();  // Returns true if user pressed button to enable OTA
 
 // Clear all persistent storage (NVS/Preferences/EEPROM)
 // This ensures clean state on every boot
@@ -130,6 +132,73 @@ void clearPersistentStorage() {
   }
   
   Serial.println("Persistent storage cleared - starting fresh");
+}
+
+// Wait for button press at boot to enable OTA/WiFi
+// Shows countdown on TFT, returns true if button pressed
+bool waitForOTAButton() {
+  // Setup button pin early (before normal GPIO init)
+  pinMode(BTN, INPUT);
+  
+  // Show OTA prompt
+  tft.fillRect(0, 20, DISPLAY_WIDTH, 100, ST77XX_BLACK);
+  tft.setCursor(4, 24);
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
+  tft.println("Press BTN for OTA");
+  tft.setCursor(4, 40);
+  tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
+  tft.println("WiFi/NTP enabled");
+  tft.setCursor(4, 56);
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  tft.println("Or wait for");
+  tft.setCursor(4, 72);
+  tft.println("offline mode...");
+  
+  Serial.println("Waiting for OTA button press...");
+  
+  unsigned long startMs = millis();
+  unsigned long waitMs = OTA_WAIT_SECONDS * 1000UL;
+  int lastSec = -1;
+  
+  while (millis() - startMs < waitMs) {
+    // Check button (GPIO4 = active HIGH with flash LED)
+    if (digitalRead(BTN) == HIGH) {
+      // Button pressed - enable OTA
+      tft.fillRect(0, 90, DISPLAY_WIDTH, 20, ST77XX_BLACK);
+      tft.setCursor(4, 94);
+      tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
+      tft.println("OTA ENABLED!");
+      Serial.println("Button pressed - OTA enabled");
+      delay(500);
+      return true;
+    }
+    
+    // Update countdown
+    int secRemain = (waitMs - (millis() - startMs)) / 1000;
+    if (secRemain != lastSec) {
+      lastSec = secRemain;
+      tft.fillRect(0, 90, DISPLAY_WIDTH, 20, ST77XX_BLACK);
+      tft.setCursor(4, 94);
+      tft.setTextColor(ST77XX_MAGENTA, ST77XX_BLACK);
+      char countStr[16];
+      snprintf(countStr, sizeof(countStr), "Timeout: %ds", secRemain);
+      tft.println(countStr);
+      Serial.printf("OTA wait: %ds remaining\n", secRemain);
+    }
+    
+    delay(50);  // Small delay to prevent CPU hogging
+  }
+  
+  // Timeout - offline mode
+  tft.fillRect(0, 90, DISPLAY_WIDTH, 20, ST77XX_BLACK);
+  tft.setCursor(4, 94);
+  tft.setTextColor(ST77XX_RED, ST77XX_BLACK);
+  tft.println("OFFLINE MODE");
+  Serial.println("No button - offline mode");
+  delay(300);
+  
+  return false;
 }
 
 // Boot log: print message
@@ -317,6 +386,15 @@ void setupOTA() {
   Serial.print("WiFi ready: ");
   Serial.println(WiFi.localIP());
 
+  // Sync RTC with NTP (accurate time from internet)
+  bootLog("NTP sync...", false);
+  if (rtcHandler.syncWithNTP(5000)) {
+    bootLogOK();
+  } else {
+    bootLogFAIL();
+    bootLog("Using RTC time");
+  }
+
   if (!MDNS.begin(OTA_HOSTNAME)) {
     bootLog("mDNS failed");
   }
@@ -369,7 +447,18 @@ void setup() {
   tft_drawtext(8, 3, "ESP32-CAM Boot", 1, ST77XX_WHITE);
   bootLine = 2;  // Start below header
   
-  delay(300);
+  // ===== OTA MODE SELECTION =====
+  // User has OTA_WAIT_SECONDS to press button to enable WiFi/OTA/NTP
+  // If no press, boots in offline mode (faster, no WiFi overhead)
+  otaEnabled = waitForOTAButton();
+  
+  // Clear screen and redraw header for normal boot
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillRect(0, 0, DISPLAY_WIDTH, 14, ST77XX_BLUE);
+  tft_drawtext(8, 3, "ESP32-CAM Boot", 1, ST77XX_WHITE);
+  bootLine = 2;
+  
+  delay(100);
   
   // ===== STEP 2: Display init confirmation =====
   bootLog("TFT Display...", false);
@@ -557,10 +646,11 @@ void setup() {
   tft_drawtext(8, 3, "ESP32-CAM Boot", 1, ST77XX_WHITE);
 
   // ===== STEP 12: Optional OTA =====
-  if (OTA_ENABLED) {
+  if (otaEnabled) {
     setupOTA();
   } else {
-    bootLog("OTA/WiFi disabled");
+    bootLog("WiFi/OTA: OFFLINE");
+    bootLog("  (No btn press)");
   }
   
   // ===== STEP 13: Final memory check =====
@@ -605,18 +695,18 @@ void showCameraReady() {
       frameMutex = xSemaphoreCreateMutex();
     }
     
-    // Start camera task on Core 0 (if not already running)
+    // Start camera task on Core 0 with higher priority for speed
     if (cameraTaskHandle == NULL) {
       xTaskCreatePinnedToCore(
         cameraTask,       // Task function
         "CameraTask",     // Task name
         4096,             // Stack size
         NULL,             // Parameters
-        2,                // Priority (higher than idle)
+        3,                // Priority: higher for faster capture
         &cameraTaskHandle,// Task handle
         0                 // Core 0
       );
-      Serial.println("Camera task created on Core 0");
+      Serial.println("Camera task created on Core 0 (priority 3)");
     }
     
     freezeFrame = false;
@@ -994,7 +1084,7 @@ void loop() {
     savePhotoToSD();
   }
   
-  if (OTA_ENABLED) {
+  if (otaEnabled) {
     ArduinoOTA.handle();
   }
 

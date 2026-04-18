@@ -47,7 +47,10 @@
 #define BOOT_START_X     2
 
 // === OTA Settings ===
-constexpr bool OTA_ENABLED = true;
+// OTA_WAIT_SECONDS: Time to wait for button press at boot to enable OTA/WiFi
+// If user presses button within this time, WiFi/OTA/NTP are enabled
+// If not pressed, boots in offline mode (faster, lower power)
+#define OTA_WAIT_SECONDS 10
 #define OTA_HOSTNAME "KANCAM"
 
 // === Operating Modes ===
