@@ -50,6 +50,12 @@ public:
     return rtc.now();
   }
 
+  // Get temperature from DS3231 in Celsius
+  float getTemperature() {
+    if (!initialized) return 0.0f;
+    return rtc.getTemperature();
+  }
+
   // Format: "HH:MM:SS" for live display
   void getTimeStr(char* buf, size_t len) {
     DateTime dt = now();

@@ -53,4 +53,8 @@ constexpr bool OTA_ENABLED = true;
 // === Operating Modes ===
 constexpr bool LIVE_VIDEO_MODE = true;
 
+// === Image Rotation ===
+// 0 = No rotation, 1 = 90° CW, 2 = 180°, 3 = 270° (90° CCW)
+constexpr uint8_t IMAGE_ROTATION = 1;  // User configurable: 0-3
+
 #endif // CONFIG_H

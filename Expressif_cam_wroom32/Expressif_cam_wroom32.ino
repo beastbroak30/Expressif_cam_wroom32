@@ -132,7 +132,9 @@ void clearPersistentStorage() {
   Serial.println("Persistent storage cleared - starting fresh");
 }
 
-// Boot log: print message (always moves to next line for display)
+// Boot log: print message
+// newLine=true: print and move to next line
+// newLine=false: print on current line without advancing (for status on same line)
 void bootLog(const char* message, bool newLine) {
   int y = BOOT_START_Y + (bootLine * BOOT_LINE_HEIGHT);
   
@@ -145,67 +147,64 @@ void bootLog(const char* message, bool newLine) {
   
   tft.setCursor(BOOT_START_X, y);
   tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);  // With background to prevent overlap
   tft.print(message);
   
   Serial.print(message);
   
-  // Always increment bootLine for display (newLine only affects Serial)
-  bootLine++;
-  
+  // Only increment bootLine when newLine is true
   if (newLine) {
+    bootLine++;
     Serial.println();
   }
 }
 
-// Boot log: print status at end of line
+// Boot log: print status at end of current line
 void bootLogStatus(const char* status, uint16_t color) {
-  // Calculate position for right-aligned status
+  // Calculate position for right-aligned status on current line
   int statusLen = strlen(status);
   int x = DISPLAY_WIDTH - (statusLen * 6) - 2;  // 6 pixels per char at size 1
-  int y = BOOT_START_Y + ((bootLine - 1) * BOOT_LINE_HEIGHT);
-  
-  // If bootLine was just incremented, we need to go back one line
-  if (bootLine > 0) {
-    y = BOOT_START_Y + ((bootLine - 1) * BOOT_LINE_HEIGHT);
-  }
+  int y = BOOT_START_Y + (bootLine * BOOT_LINE_HEIGHT);
   
   tft.setCursor(x, y);
-  tft.setTextColor(color);
+  tft.setTextColor(color, ST77XX_BLACK);
   tft.print(status);
   
   Serial.print(" ");
   Serial.println(status);
+  bootLine++;  // Advance after status
 }
 
 // Boot log: OK status
 void bootLogOK() {
-  // Print on same line as previous message
-  int y = BOOT_START_Y + ((bootLine - 1) * BOOT_LINE_HEIGHT);
-  int x = DISPLAY_WIDTH - (4 * 6) - 2;  // "[ OK ]" but we'll use "[OK]"
+  // Print on same line as previous message (bootLine not incremented yet)
+  int y = BOOT_START_Y + (bootLine * BOOT_LINE_HEIGHT);
+  int x = DISPLAY_WIDTH - (4 * 6) - 2;  // "[OK]" = 4 chars
   
   tft.setCursor(x, y);
-  tft.setTextColor(ST77XX_GREEN);
+  tft.setTextColor(ST77XX_GREEN, ST77XX_BLACK);
   tft.print("[OK]");
   
   Serial.println("[OK]");
-  delay(100);  // Brief pause to see status
+  bootLine++;  // Now advance to next line
+  delay(80);
 }
 
 // Boot log: FAIL status
 void bootLogFAIL() {
-  int y = BOOT_START_Y + ((bootLine - 1) * BOOT_LINE_HEIGHT);
-  int x = DISPLAY_WIDTH - (6 * 6) - 2;
+  int y = BOOT_START_Y + (bootLine * BOOT_LINE_HEIGHT);
+  int x = DISPLAY_WIDTH - (6 * 6) - 2;  // "[FAIL]" = 6 chars
   
   tft.setCursor(x, y);
-  tft.setTextColor(ST77XX_RED);
+  tft.setTextColor(ST77XX_RED, ST77XX_BLACK);
   tft.print("[FAIL]");
   
   Serial.println("[FAIL]");
-  delay(500);
+  bootLine++;  // Advance to next line
+  delay(400);
 }
 
-// Boot log: print a value
+// Boot log: print a value on new line
 void bootLogValue(const char* label, int value, const char* unit) {
   int y = BOOT_START_Y + (bootLine * BOOT_LINE_HEIGHT);
   
@@ -217,11 +216,11 @@ void bootLogValue(const char* label, int value, const char* unit) {
   
   tft.setCursor(BOOT_START_X, y);
   tft.setTextSize(1);
-  tft.setTextColor(ST77XX_CYAN);
+  tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
   tft.print(label);
-  tft.setTextColor(ST77XX_YELLOW);
+  tft.setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
   tft.print(value);
-  tft.setTextColor(ST77XX_CYAN);
+  tft.setTextColor(ST77XX_CYAN, ST77XX_BLACK);
   tft.print(unit);
   
   Serial.print(label);
@@ -229,7 +228,7 @@ void bootLogValue(const char* label, int value, const char* unit) {
   Serial.println(unit);
   
   bootLine++;
-  delay(50);
+  delay(40);
 }
 
 void showOTAStatus(const char* line1, const char* line2, uint16_t color) {
@@ -733,16 +732,39 @@ void cameraTask(void *parameter) {
       // Clear display buffer (black side bars)
       memset(displayBuffer, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t));
       
-      // Rotate 90° CW and copy to display buffer
-      // 90° CW: dst(x, y) = src(DOWNSAMPLE_HEIGHT-1-x, y) -- mapping pre-rot to post-rot
-      // Pre-rotation: 160w x 120h → Post-rotation: 120w x 160h
+      // Apply rotation based on IMAGE_ROTATION setting (0-3)
+      // 0 = No rotation, 1 = 90° CW, 2 = 180°, 3 = 270° (90° CCW)
       for (int dy = 0; dy < DISPLAY_SCALED_HEIGHT; dy++) {
         for (int dx = 0; dx < DISPLAY_SCALED_WIDTH; dx++) {
-          // Map rotated display coords back to pre-rotation coords
-          int srcX = dy;                          // post-rot Y → pre-rot X
-          int srcY = (DOWNSAMPLE_HEIGHT - 1) - dx; // post-rot X → pre-rot Y (flipped)
-          uint16_t pixel = tempBuffer[srcY * DOWNSAMPLE_WIDTH + srcX];
-          displayBuffer[(dy + DISPLAY_Y_OFFSET) * DISPLAY_WIDTH + (dx + DISPLAY_X_OFFSET)] = pixel;
+          int srcX, srcY;
+          
+          switch (IMAGE_ROTATION) {
+            case 0:  // No rotation
+              srcX = dx;
+              srcY = dy;
+              break;
+            case 1:  // 90° CW (default)
+              srcX = dy;
+              srcY = (DOWNSAMPLE_HEIGHT - 1) - dx;
+              break;
+            case 2:  // 180°
+              srcX = (DOWNSAMPLE_WIDTH - 1) - dx;
+              srcY = (DOWNSAMPLE_HEIGHT - 1) - dy;
+              break;
+            case 3:  // 270° (90° CCW)
+              srcX = (DOWNSAMPLE_WIDTH - 1) - dy;
+              srcY = dx;
+              break;
+            default:
+              srcX = dy;
+              srcY = (DOWNSAMPLE_HEIGHT - 1) - dx;
+          }
+          
+          // Bounds check
+          if (srcX >= 0 && srcX < DOWNSAMPLE_WIDTH && srcY >= 0 && srcY < DOWNSAMPLE_HEIGHT) {
+            uint16_t pixel = tempBuffer[srcY * DOWNSAMPLE_WIDTH + srcX];
+            displayBuffer[(dy + DISPLAY_Y_OFFSET) * DISPLAY_WIDTH + (dx + DISPLAY_X_OFFSET)] = pixel;
+          }
         }
       }
       
@@ -797,16 +819,16 @@ void displayFrameFromBuffer() {
       // Compute histogram from display buffer
       cameraHUD.computeHistogram(displayBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
        
-      // Get date+time string from RTC
-      char dtStr[20] = "";
+      // Get compact date+time string from RTC: "DD/MM HH:MM"
+      char dtStr[14] = "";
+      float tempC = 0.0f;
       if (rtcHandler.isAvailable()) {
-        DateTime dt = rtcHandler.now();
-        snprintf(dtStr, sizeof(dtStr), "%02d/%02d/%04d %02d:%02d",
-                 dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
+        rtcHandler.getDateTimeCompactStr(dtStr, sizeof(dtStr));
+        tempC = rtcHandler.getTemperature();
       }
       
-      // Draw DSLR-style HUD overlay
-      cameraHUD.draw(currentFps, dtStr, photoCounter, sdCardMounted);
+      // Draw DSLR-style HUD overlay with temperature
+      cameraHUD.draw(currentFps, dtStr, photoCounter, sdCardMounted, tempC);
     }
   }
 }

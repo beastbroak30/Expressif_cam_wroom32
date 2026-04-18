@@ -6,12 +6,14 @@
 
 // Camera HUD Overlay — Horizontal DSLR-style viewfinder UI for 128x160 ST7735
 // Optimized for 90° rotated display (landscape orientation)
-// Minimal RAM usage: histogram uses a single 48-bin array (96 bytes)
+// Minimal RAM usage: histogram uses a single 32-bin array (64 bytes)
 // All drawing is direct to TFT — no secondary framebuffer needed
 
 #define HUD_TOP_BAR_H    10
 #define HUD_WAVE_W       32   // Wave render width at bottom corner
-#define HUD_WAVE_H       16   // Wave render height
+#define HUD_WAVE_H       14   // Wave render height
+#define HUD_TEMP_W       28   // Temperature box width
+#define HUD_TEMP_H       12   // Temperature box height
 #define HUD_HIST_BINS    32   // Bins for wave visualization
 
 class CameraHUD {
@@ -61,41 +63,65 @@ public:
 
   // Draw the horizontal HUD overlay
   // fps: current FPS value
-  // dateTimeStr: e.g. "05/04/2026 14:30" (horizontal, top-right)
+  // dateTimeStr: e.g. "18/04 14:30" (compact format)  
   // photoCount: number of photos taken
   // sdReady: SD card status
-  void draw(float fps, const char* dateTimeStr, unsigned int photoCount, bool sdReady) {
+  // tempC: temperature from DS3231 in Celsius
+  void draw(float fps, const char* dateTimeStr, unsigned int photoCount, bool sdReady, float tempC = 0.0f) {
     if (!tft) return;
 
     // === TOP BAR: semi-transparent black strip (horizontal) ===
     tft->fillRect(0, 0, dispW, HUD_TOP_BAR_H, ST77XX_BLACK);
 
     // FPS — top-left, green
-    char fpsStr[10];
+    char fpsStr[8];
     snprintf(fpsStr, sizeof(fpsStr), "%.1f", fps);
     tft->setCursor(2, 1);
     tft->setTextSize(1);
-    tft->setTextColor(ST77XX_GREEN);
+    tft->setTextColor(ST77XX_GREEN, ST77XX_BLACK);
     tft->print(fpsStr);
 
     // SD status + Photo count — center
-    char infoStr[12];
-    snprintf(infoStr, sizeof(infoStr), "%c#%03d", sdReady ? '\x07' : '!', photoCount);
+    char infoStr[10];
+    snprintf(infoStr, sizeof(infoStr), "%c%03d", sdReady ? '#' : '!', photoCount);
     int infoW = strlen(infoStr) * 6;
     tft->setCursor((dispW - infoW) / 2, 1);
-    tft->setTextColor(sdReady ? ST77XX_CYAN : ST77XX_RED);
+    tft->setTextColor(sdReady ? ST77XX_CYAN : ST77XX_RED, ST77XX_BLACK);
     tft->print(infoStr);
 
-    // Date+Time — top-right, white
+    // Date+Time — top-right, white (compact: "DD/MM HH:MM")
     if (dateTimeStr && dateTimeStr[0]) {
       int tw = strlen(dateTimeStr) * 6;
       tft->setCursor(dispW - tw - 1, 1);
-      tft->setTextColor(ST77XX_WHITE);
+      tft->setTextColor(ST77XX_WHITE, ST77XX_BLACK);
       tft->print(dateTimeStr);
     }
 
-    // === WAVE RENDER — bottom-right corner only ===
+    // === BOTTOM: Temperature box (left) + Wave render (right) ===
+    // Temperature display
+    if (tempC != 0.0f) {
+      drawTemperature(2, dispH - HUD_TEMP_H - 2, tempC);
+    }
+    
+    // Wave render — bottom-right corner
     drawWaveform(dispW - HUD_WAVE_W - 2, dispH - HUD_WAVE_H - 2);
+  }
+
+  // Draw temperature box at given position
+  void drawTemperature(int x, int y, float tempC) {
+    if (!tft) return;
+    
+    // Dark background
+    tft->fillRect(x, y, HUD_TEMP_W, HUD_TEMP_H, 0x0000);
+    
+    // Temperature text: "25°C" format
+    char tempStr[8];
+    snprintf(tempStr, sizeof(tempStr), "%d%cC", (int)tempC, 0xF8);  // 0xF8 = degree symbol
+    
+    tft->setCursor(x + 2, y + 2);
+    tft->setTextSize(1);
+    tft->setTextColor(ST77XX_YELLOW, ST77XX_BLACK);
+    tft->print(tempStr);
   }
 
   // Draw waveform visualization at given position (audio-style wave bars)
@@ -104,7 +130,7 @@ public:
     if (!tft || histMax == 0) return;
 
     // Semi-transparent dark background
-    tft->fillRect(x, y, HUD_WAVE_W, HUD_WAVE_H, 0x0000);  // Black with alpha effect
+    tft->fillRect(x, y, HUD_WAVE_W, HUD_WAVE_H, 0x0000);
 
     // Draw wave bars
     for (int i = 0; i < HUD_HIST_BINS; i++) {
