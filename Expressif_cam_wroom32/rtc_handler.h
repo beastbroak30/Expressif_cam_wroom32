@@ -69,6 +69,13 @@ public:
              dt.day(), dt.month(), dt.hour(), dt.minute());
   }
 
+  // Format: "DD/MM/YYYY HH:MM" full date+time for display
+  void getDateTimeFullStr(char* buf, size_t len) {
+    DateTime dt = now();
+    snprintf(buf, len, "%02d/%02d/%04d %02d:%02d",
+             dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute());
+  }
+
   // Format: "DD/MM/YY HH:MM" for photo stamp
   void getTimestampStr(char* buf, size_t len) {
     DateTime dt = now();

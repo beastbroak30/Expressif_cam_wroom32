@@ -819,11 +819,11 @@ void displayFrameFromBuffer() {
       // Compute histogram from display buffer
       cameraHUD.computeHistogram(displayBuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
        
-      // Get compact date+time string from RTC: "DD/MM HH:MM"
-      char dtStr[14] = "";
+      // Get full date+time string from RTC: "DD/MM/YYYY HH:MM"
+      char dtStr[20] = "";
       float tempC = 0.0f;
       if (rtcHandler.isAvailable()) {
-        rtcHandler.getDateTimeCompactStr(dtStr, sizeof(dtStr));
+        rtcHandler.getDateTimeFullStr(dtStr, sizeof(dtStr));
         tempC = rtcHandler.getTemperature();
       }
       
@@ -961,9 +961,13 @@ void savePhotoToSD() {
   tft.setRotation(0);
   tft.fillScreen(ST77XX_BLACK);
   
-  // 10. Show success message
+  // 10. Show success message with date/time
   char msg[20];
-  snprintf(msg, sizeof(msg), "Saved #%d", photoCounter - 1);
+  if (rtcHandler.isAvailable()) {
+    rtcHandler.getDateTimeCompactStr(msg, sizeof(msg));  // DD/MM HH:MM
+  } else {
+    snprintf(msg, sizeof(msg), "SAVED");
+  }
   showStatusBox(msg, ST77XX_GREEN, ST77XX_BLACK);
   delay(1000);
   

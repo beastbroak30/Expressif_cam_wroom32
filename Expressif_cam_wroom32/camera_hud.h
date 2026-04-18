@@ -81,15 +81,7 @@ public:
     tft->setTextColor(ST77XX_GREEN, ST77XX_BLACK);
     tft->print(fpsStr);
 
-    // SD status + Photo count — center
-    char infoStr[10];
-    snprintf(infoStr, sizeof(infoStr), "%c%03d", sdReady ? '#' : '!', photoCount);
-    int infoW = strlen(infoStr) * 6;
-    tft->setCursor((dispW - infoW) / 2, 1);
-    tft->setTextColor(sdReady ? ST77XX_CYAN : ST77XX_RED, ST77XX_BLACK);
-    tft->print(infoStr);
-
-    // Date+Time — top-right, white (compact: "DD/MM HH:MM")
+    // Date+Time — top-right, white
     if (dateTimeStr && dateTimeStr[0]) {
       int tw = strlen(dateTimeStr) * 6;
       tft->setCursor(dispW - tw - 1, 1);
