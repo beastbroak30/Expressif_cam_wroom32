@@ -227,7 +227,7 @@ void bootLog(const char* message, bool newLine) {
     Serial.println();
   }
 }
-
+ 
 // Boot log: print status at end of current line
 void bootLogStatus(const char* status, uint16_t color) {
   // Calculate position for right-aligned status on current line
