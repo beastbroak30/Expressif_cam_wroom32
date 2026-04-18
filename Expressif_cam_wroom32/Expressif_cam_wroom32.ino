@@ -47,9 +47,11 @@ float currentFps = 0.0f;
 
 // === Dual-core Processing ===
 TaskHandle_t cameraTaskHandle = NULL;
+TaskHandle_t otaTaskHandle = NULL;  // OTA runs on Core 0 with highest priority
 volatile bool newFrameReady = false;
 volatile bool frameBeingDisplayed = false;
 volatile bool cameraPaused = false;
+volatile bool otaInProgress = false;  // Stops ALL other tasks during OTA
 uint16_t *displayBuffer = NULL;
 SemaphoreHandle_t frameMutex = NULL;
 
@@ -97,6 +99,7 @@ void bootLogFAIL();
 void bootLogValue(const char* label, int value, const char* unit = "");
 void tft_drawtext(int16_t x, int16_t y, const char* text, uint8_t font_size, uint16_t color);
 void setupOTA();
+void otaTask(void *parameter);  // Dedicated OTA task on Core 0
 void showOTAStatus(const char* line1, const char* line2, uint16_t color);
 void showOTAProgress(unsigned int progress, unsigned int total);
 const char* otaErrorToText(ota_error_t error);
@@ -402,11 +405,16 @@ void setupOTA() {
 
   bootLog("OTA init...", false);
   ArduinoOTA.setHostname(OTA_HOSTNAME);
-  ArduinoOTA.setTimeout(20000);
+  ArduinoOTA.setTimeout(20000);  // Increased timeout for reliability
   ArduinoOTA.onStart([]() {
+    // STOP everything - OTA is now #1 priority
+    otaInProgress = true;
+    cameraPaused = true;
+    freezeFrame = true;
+    
     otaLastPercentShown = 101;
     showOTAStatus("Starting update", "Preparing flash", ST77XX_GREEN);
-    Serial.println("OTA start");
+    Serial.println("OTA start - ALL tasks paused");
   });
   ArduinoOTA.onEnd([]() {
     showOTAStatus("Update complete", "Rebooting...", ST77XX_GREEN);
@@ -421,9 +429,28 @@ void setupOTA() {
     snprintf(errorText, sizeof(errorText), "Error code: %u", error);
     showOTAStatus(otaErrorToText(error), errorText, ST77XX_RED);
     Serial.printf("OTA Error[%u]: %s\n", error, otaErrorToText(error));
+    
+    // Resume tasks on error
+    otaInProgress = false;
+    cameraPaused = false;
+    freezeFrame = false;
   });
   ArduinoOTA.begin();
   bootLogOK();
+  
+  // Start dedicated OTA task on Core 0 with HIGHEST priority
+  // This ensures OTA always runs, even when camera is busy
+  xTaskCreatePinnedToCore(
+    otaTask,           // Task function  
+    "OTA_Task",        // Name
+    4096,              // Stack
+    NULL,              // Parameters
+    configMAX_PRIORITIES - 1,  // HIGHEST priority
+    &otaTaskHandle,    // Handle
+    0                  // Core 0 (WiFi/protocol core)
+  );
+  Serial.println("OTA task started on Core 0 (highest priority)");
+  
   bootLog("IP: REDACTED_IP");
   bootLog("OTA: KANCAM");
 }
@@ -784,6 +811,25 @@ void downsampleImage(uint16_t* src, int srcW, int srcH, uint16_t* dst, int dstW,
   }
 }
 
+// OTA Task - runs on Core 0 with HIGHEST priority
+// Always listening for OTA, stops everything else when update starts
+void otaTask(void *parameter) {
+  Serial.println("OTA task started on Core 0 (highest priority)");
+  
+  while (true) {
+    // OTA.handle() must be called frequently to detect incoming updates
+    ArduinoOTA.handle();
+    
+    // During OTA, run as fast as possible (no delay)
+    // Otherwise, yield to let camera task run
+    if (otaInProgress) {
+      taskYIELD();  // Minimal yield during OTA
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));  // Normal: check every 10ms
+    }
+  }
+}
+
 // Camera capture task - runs on Core 0
 void cameraTask(void *parameter) {
   Serial.println("Camera task started on Core 0");
@@ -1073,6 +1119,12 @@ void savePhotoToSD() {
 
 // main loop
 void loop() {
+  // During OTA, do NOTHING - let OTA task have full control
+  if (otaInProgress) {
+    delay(10);  // Just yield to OTA task
+    return;
+  }
+  
   // Check for button interrupt (async, responsive)
   if (buttonInterruptFlag) {
     buttonInterruptFlag = false;
@@ -1085,9 +1137,7 @@ void loop() {
     savePhotoToSD();
   }
   
-  if (otaEnabled) {
-    ArduinoOTA.handle();
-  }
+  // OTA is handled by dedicated task on Core 0 - no need to call here
 
   // Live video mode
   if (LIVE_VIDEO_MODE && !freezeFrame && !cameraPaused && !photoDisplayed) {
@@ -1098,7 +1148,7 @@ void loop() {
   if (!LIVE_VIDEO_MODE) {
     delay(10);
   } else {
-    // Give WiFi/OTA tasks time to run (1ms is enough)
+    // Give other tasks time to run
     delay(1);
   }
 }
