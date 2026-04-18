@@ -387,8 +387,9 @@ void setupOTA() {
   Serial.println(WiFi.localIP());
 
   // Sync RTC with NTP (accurate time from internet)
+  // 10 second timeout - SNTP sync can take a few seconds
   bootLog("NTP sync...", false);
-  if (rtcHandler.syncWithNTP(5000)) {
+  if (rtcHandler.syncWithNTP(10000)) {
     bootLogOK();
   } else {
     bootLogFAIL();

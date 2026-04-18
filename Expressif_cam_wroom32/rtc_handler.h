@@ -3,13 +3,14 @@
 
 #include <Wire.h>
 #include <RTClib.h>
-#include <time.h>  // For NTP sync
+#include <time.h>       // For NTP sync
+#include <esp_sntp.h>   // For sntp_get_sync_status
 
 // NTP Configuration for IST (India Standard Time = GMT+5:30)
 #define NTP_SERVER1       "pool.ntp.org"
 #define NTP_SERVER2       "time.google.com"
-#define NTP_GMT_OFFSET    19800   // IST = +5:30 = 5*3600 + 30*60 = 19800 seconds
-#define NTP_DAYLIGHT_OFF  0       // India doesn't use DST
+// TZ string: IST-5:30 (no DST in India)
+#define NTP_TZ_IST        "IST-5:30"
 
 // DS3231 RTC Handler
 // Uses GPIO 3 (RX/SDA) and GPIO 1 (TX/SCL) for I2C
@@ -103,22 +104,28 @@ public:
 
   // Sync RTC with NTP time (call after WiFi connected)
   // Returns true if sync successful
-  bool syncWithNTP(unsigned long timeoutMs = 5000) {
+  bool syncWithNTP(unsigned long timeoutMs = 10000) {
     if (!initialized) return false;
     
     Serial.println("Starting NTP sync...");
-    configTime(NTP_GMT_OFFSET, NTP_DAYLIGHT_OFF, NTP_SERVER1, NTP_SERVER2);
     
-    struct tm timeinfo;
+    // Configure timezone and NTP servers using TZ string
+    configTzTime(NTP_TZ_IST, NTP_SERVER1, NTP_SERVER2);
+    
+    // Wait for SNTP sync to actually complete
     unsigned long startMs = millis();
-    
-    // Wait for NTP response
-    while (!getLocalTime(&timeinfo) && (millis() - startMs < timeoutMs)) {
+    while (sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
+      if (millis() - startMs > timeoutMs) {
+        Serial.println("NTP sync failed - timeout waiting for SNTP");
+        return false;
+      }
       delay(100);
     }
     
-    if (!getLocalTime(&timeinfo)) {
-      Serial.println("NTP sync failed - timeout");
+    // Now get the synced time
+    struct tm timeinfo;
+    if (!getLocalTime(&timeinfo, 1000)) {
+      Serial.println("NTP sync failed - getLocalTime failed");
       return false;
     }
     
