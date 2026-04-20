@@ -1054,6 +1054,67 @@ void handleButtonPress() {
   saveRequested = true;  // Will be handled in main loop
 }
 
+// Restore camera and TFT after SD card operations
+// SD_MMC and TFT share GPIO 2, 14, 15 - need proper sequencing
+void restoreCameraAfterSD() {
+  Serial.println("Restoring camera and TFT...");
+  
+  // 1. Ensure camera is deinit'd (may have been left in JPEG mode)
+  esp_camera_deinit();
+  delay(100);
+  
+  // 2. Re-init TFT first (GPIO 2, 14, 15 now free)
+  tft.initR(INITR_GREENTAB);
+  tft.setRotation(0);
+  tft.fillScreen(ST77XX_BLACK);
+  delay(50);
+  
+  // 3. Re-init camera in RGB565 mode
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 24000000;
+  config.pixel_format = PIXFORMAT_RGB565;
+  config.frame_size = FRAMESIZE_QVGA;
+  config.jpeg_quality = 12;
+  config.fb_count = 2;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+  
+  if (esp_camera_init(&config) != ESP_OK) {
+    Serial.println("Camera restore failed! Rebooting...");
+    ESP.restart();
+  }
+  
+  // 4. Restore sensor settings
+  sensor_t *s = esp_camera_sensor_get();
+  CameraSettings::configureSensorForLiveView(s);
+  s->set_special_effect(s, 0);
+  
+  // 5. Resume camera task
+  newFrameReady = false;
+  cameraPaused = false;
+  freezeFrame = false;
+  
+  Serial.println("Camera and TFT restored");
+}
+
 // Show status message with box
 void showStatusBox(const char* msg, uint16_t bgColor, uint16_t textColor) {
   int boxW = 100;
@@ -1079,13 +1140,19 @@ void savePhotoToSD() {
   // 1. Pause camera task
   cameraPaused = true;
   freezeFrame = true;
-  delay(50);  // Wait for camera task to pause
+  delay(500);  // Wait for camera task to pause
   Serial.println("Camera paused");
   
   // 2. Show "Saving..." message
   showStatusBox("Saving...", ST77XX_BLUE, ST77XX_WHITE);
+  delay(100);  // Let user see the message
   
-  // 3. Initialize SD card (takes over TFT pins temporarily)
+  // 3. Deinit camera BEFORE SD init (releases shared pins)
+  esp_camera_deinit();
+  delay(100);
+  Serial.println("Camera deinit for SD access");
+  
+  // 4. Initialize SD card (takes over shared GPIO pins)
   Serial.println("Initializing SD card...");
   SDCardHandler sdCard(&photoCounter);
   
@@ -1093,27 +1160,25 @@ void savePhotoToSD() {
     Serial.println("SD Card init failed!");
     
     // Re-init TFT and show error
-    delay(50);
+    delay(100);
     tft.initR(INITR_GREENTAB);
     tft.setRotation(0);
     showStatusBox("SD FAILED!", ST77XX_RED, ST77XX_WHITE);
     delay(1500);
     
-    // Resume camera
-    cameraPaused = false;
-    freezeFrame = false;
+    // Restore camera
+    restoreCameraAfterSD();
     return;
   }
   Serial.println("SD Card initialized");
   
-  // 3b. Give SD card time to stabilize
+  // 5. Give SD card time to stabilize
   delay(200);
   
-  // 3c. Scan SD card and update counter to avoid overwriting
-  // This ensures we always use a unique filename
+  // 6. Scan SD card and update counter to avoid overwriting
   sdCard.updateCounterFromExistingPhotos();
   
-  // 4. Save the current camera config for restoration
+  // 7. Capture and save photo (camera reinit handled inside)
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -1133,60 +1198,38 @@ void savePhotoToSD() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 24000000;  // Increased from 20MHz to 24MHz for faster operation
+  config.xclk_freq_hz = 24000000;
   
-  // 5. Capture and save photo with correct colors (using SDCardHandler module)
-  //    This module applies the correct sensor settings to fix greenish tint
   bool success = sdCard.captureAndSave(config, psramFound(), &rtcHandler);
-  //test
-  // 6. Close SD card
+  
+  // 8. Close SD card - MUST release pins before TFT init
   sdCard.end();
+  delay(100);  // Let SD_MMC fully release GPIO
   Serial.println("SD Card closed");
   
-  // 7. Restore camera to RGB565 mode for live view
-  esp_camera_deinit();
-  delay(100);
+  // 9. Restore camera and TFT
+  restoreCameraAfterSD();
   
-  config.pixel_format = PIXFORMAT_RGB565;
-  config.frame_size = FRAMESIZE_QVGA;  // 320x240
-  config.jpeg_quality = 12;
-  config.fb_count = 2;
-  config.grab_mode = CAMERA_GRAB_LATEST;
-  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
-  
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("Camera restore failed! Rebooting...");
-    ESP.restart();
-  }
-  
-  // Restore sensor settings using CameraSettings module
-  sensor_t *s = esp_camera_sensor_get();
-  CameraSettings::configureSensorForLiveView(s);
-  s->set_special_effect(s, 0);
-  
-  // 9. Re-init TFT (SD may have messed with pins)
-  delay(50);
-  tft.initR(INITR_GREENTAB);
-  tft.setRotation(0);
-  tft.fillScreen(ST77XX_BLACK);
-  
-  // 10. Show success message with date/time
-  char msg[20];
-  if (rtcHandler.isAvailable()) {
-    rtcHandler.getDateTimeCompactStr(msg, sizeof(msg));  // DD/MM HH:MM
+  // 10. Show result message
+  if (success) {
+    char msg[20];
+    if (rtcHandler.isAvailable()) {
+      rtcHandler.getDateTimeCompactStr(msg, sizeof(msg));
+    } else {
+      snprintf(msg, sizeof(msg), "SAVED #%d", photoCounter);
+    }
+    showStatusBox(msg, ST77XX_GREEN, ST77XX_BLACK);
+    Serial.printf("Photo saved! Counter: %d\n", photoCounter);
   } else {
-    snprintf(msg, sizeof(msg), "SAVED");
+    showStatusBox("SAVE FAIL", ST77XX_RED, ST77XX_WHITE);
+    Serial.println("Photo save failed!");
   }
-  showStatusBox(msg, ST77XX_GREEN, ST77XX_BLACK);
   delay(1000);
   
-  // 11. Resume camera task
+  // 11. Clear display and resume live view
   tft.fillScreen(ST77XX_BLACK);
-  newFrameReady = false;
-  cameraPaused = false;
-  freezeFrame = false;
   
-  Serial.println("=== Photo save complete, camera resumed ===");
+  Serial.println("=== Photo save complete ===");
 }
 
 // main loop
