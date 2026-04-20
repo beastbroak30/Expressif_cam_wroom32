@@ -47,21 +47,19 @@ float currentFps = 0.0f;
 
 // === Dual-core Processing ===
 TaskHandle_t cameraTaskHandle = NULL;
-TaskHandle_t otaTaskHandle = NULL;  // OTA runs on Core 1 with display for live updates
+TaskHandle_t otaTaskHandle = NULL;  // OTA runs on Core 1 with display
 volatile bool newFrameReady = false;
 volatile bool frameBeingDisplayed = false;
 volatile bool cameraPaused = false;
-volatile bool otaInProgress = false;  // Pauses camera, display continues with OTA status
+volatile bool otaInProgress = false;  // OTA active - display shows progress
+volatile unsigned int otaProgress = 0;  // 0-100 percent
+volatile unsigned int otaTotal = 100;
+volatile bool otaStarted = false;
+volatile bool otaComplete = false;
+volatile bool otaError = false;
+volatile ota_error_t otaErrorCode = OTA_AUTH_ERROR;
 uint16_t *displayBuffer = NULL;
 SemaphoreHandle_t frameMutex = NULL;
-
-// === OTA State (for non-blocking display updates) ===
-enum OTAState { OTA_IDLE, OTA_STARTING, OTA_RECEIVING, OTA_COMPLETE, OTA_ERROR };
-volatile OTAState otaState = OTA_IDLE;
-volatile unsigned int otaProgress = 0;
-volatile unsigned int otaTotal = 0;
-volatile ota_error_t otaErrorCode = OTA_AUTH_ERROR;
-volatile unsigned long otaLastUpdateMs = 0;  // For animation timing
 
 // === Photo Saving ===
 unsigned int photoCounter = 0;
@@ -107,10 +105,9 @@ void bootLogFAIL();
 void bootLogValue(const char* label, int value, const char* unit = "");
 void tft_drawtext(int16_t x, int16_t y, const char* text, uint8_t font_size, uint16_t color);
 void setupOTA();
-void otaTask(void *parameter);  // Dedicated OTA task on Core 1 with display
+void otaTask(void *parameter);  // Dedicated OTA task on Core 0
 void showOTAStatus(const char* line1, const char* line2, uint16_t color);
 void showOTAProgress(unsigned int progress, unsigned int total);
-void displayOTAScreen();  // Non-blocking OTA display update
 const char* otaErrorToText(ota_error_t error);
 void displayLiveFrame();
 void showCameraReady();
@@ -416,59 +413,57 @@ void setupOTA() {
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   ArduinoOTA.setTimeout(20000);  // Increased timeout for reliability
   ArduinoOTA.onStart([]() {
-    // Pause camera, but display keeps running to show OTA progress
+    // OTA started - camera pauses, display continues for progress
     otaInProgress = true;
+    otaStarted = true;
+    otaComplete = false;
+    otaError = false;
+    otaProgress = 0;
     cameraPaused = true;
     freezeFrame = true;
     
-    // Set state for display loop to render
-    otaState = OTA_STARTING;
-    otaProgress = 0;
-    otaTotal = 0;
-    otaLastUpdateMs = millis();
     otaLastPercentShown = 101;
-    
-    Serial.println("OTA start - camera paused, display continues");
+    Serial.println("OTA start - camera paused, display active");
   });
   ArduinoOTA.onEnd([]() {
-    otaState = OTA_COMPLETE;
-    otaLastUpdateMs = millis();
-    Serial.println("\nOTA complete - rebooting...");
+    otaComplete = true;
+    otaProgress = 100;
+    Serial.println("\nOTA end");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    // Just update state - display loop will render
     otaProgress = progress;
     otaTotal = total;
-    otaState = OTA_RECEIVING;
-    otaLastUpdateMs = millis();
-    
     Serial.printf("OTA Progress: %u%%\r", (progress * 100U) / total);
   });
   ArduinoOTA.onError([](ota_error_t error) {
-    otaState = OTA_ERROR;
+    otaError = true;
     otaErrorCode = error;
-    otaLastUpdateMs = millis();
     Serial.printf("OTA Error[%u]: %s\n", error, otaErrorToText(error));
     
-    // Resume after error (display will show error for 3 seconds then resume)
+    // Resume tasks on error after display shows it
+    delay(2000);
+    otaInProgress = false;
+    otaStarted = false;
+    cameraPaused = false;
+    freezeFrame = false;
   });
   ArduinoOTA.begin();
   bootLogOK();
   
-  // Start dedicated OTA task on Core 1 (display core) for responsive updates
-  // This ensures OTA handle() runs alongside display updates
+  // Start OTA task on Core 1 - same core as display
+  // WiFi still handled by Core 0, but OTA logic on Core 1
   xTaskCreatePinnedToCore(
     otaTask,           // Task function  
     "OTA_Task",        // Name
     4096,              // Stack
     NULL,              // Parameters
-    configMAX_PRIORITIES - 1,  // HIGHEST priority on Core 1
+    2,                 // Priority 2 (display runs in loop)
     &otaTaskHandle,    // Handle
-    1                  // Core 1 (display core) - allows live OTA status updates
+    1                  // Core 1 (same as main loop/display)
   );
-  Serial.println("OTA task started on Core 1 (display core, highest priority)");
+  Serial.println("OTA task started on Core 1");
   
-  bootLog("IP: REDACTED_IP");
+  bootLog("IP: 192.168.1.45");
   bootLog("OTA: KANCAM");
 }
 
@@ -828,165 +823,22 @@ void downsampleImage(uint16_t* src, int srcW, int srcH, uint16_t* dst, int dstW,
   }
 }
 
-// OTA Task - runs on Core 1 (display core) for live progress updates
-// Runs ArduinoOTA.handle() frequently while yielding to display loop
+// OTA Task - runs on Core 1 alongside display
+// Handles ArduinoOTA polling, display updates done in main loop
 void otaTask(void *parameter) {
-  Serial.println("OTA task started on Core 1 (display core)");
+  Serial.println("OTA task started on Core 1");
   
   while (true) {
     // OTA.handle() must be called frequently to detect incoming updates
     ArduinoOTA.handle();
     
-    // During active OTA, run frequently but yield for display updates
+    // During OTA, run fast to handle WiFi packets
+    // Otherwise, longer delay is fine
     if (otaInProgress) {
-      vTaskDelay(pdMS_TO_TICKS(5));  // Quick yield during OTA - display loop will render
+      vTaskDelay(pdMS_TO_TICKS(5));  // Fast during OTA
     } else {
-      vTaskDelay(pdMS_TO_TICKS(50));  // Normal: check every 50ms when idle
+      vTaskDelay(pdMS_TO_TICKS(20));  // Normal: check every 20ms
     }
-  }
-}
-
-// Non-blocking OTA display screen - renders current OTA state
-// Called from main loop for continuous updates during OTA
-void displayOTAScreen() {
-  static OTAState lastState = OTA_IDLE;
-  static unsigned int lastPercent = 101;
-  static unsigned long lastAnimMs = 0;
-  static int animFrame = 0;
-  
-  unsigned long now = millis();
-  
-  // Handle state transitions
-  if (otaState != lastState) {
-    lastState = otaState;
-    tft.fillScreen(ST77XX_BLACK);
-    
-    // Draw header for all OTA states
-    tft.fillRect(0, 0, DISPLAY_WIDTH, 20, ST77XX_BLUE);
-    tft_drawtext(20, 6, "OTA Update", 1, ST77XX_WHITE);
-  }
-  
-  switch (otaState) {
-    case OTA_STARTING: {
-      // Animated "Preparing..." with dots
-      if (now - lastAnimMs >= 300) {
-        lastAnimMs = now;
-        animFrame = (animFrame + 1) % 4;
-        
-        char dots[5] = "    ";
-        for (int i = 0; i < animFrame; i++) dots[i] = '.';
-        
-        tft.fillRect(8, 50, 100, 30, ST77XX_BLACK);
-        tft_drawtext(8, 50, "Preparing flash", 1, ST77XX_GREEN);
-        tft_drawtext(8, 65, dots, 1, ST77XX_CYAN);
-      }
-      break;
-    }
-    
-    case OTA_RECEIVING: {
-      unsigned int percent = 0;
-      if (otaTotal > 0) {
-        percent = (otaProgress * 100U) / otaTotal;
-      }
-      
-      // Only redraw if percent changed
-      if (percent != lastPercent) {
-        lastPercent = percent;
-        
-        // Progress text
-        char progressStr[24];
-        snprintf(progressStr, sizeof(progressStr), "Receiving: %u%%", percent);
-        tft.fillRect(8, 45, 112, 15, ST77XX_BLACK);
-        tft_drawtext(8, 48, progressStr, 1, ST77XX_YELLOW);
-        
-        // Progress bar
-        const int barX = 8;
-        const int barY = 70;
-        const int barWidth = DISPLAY_WIDTH - 16;
-        const int barHeight = 16;
-        int filled = (barWidth * static_cast<int>(percent)) / 100;
-        
-        // Draw bar frame
-        tft.drawRect(barX, barY, barWidth, barHeight, ST77XX_WHITE);
-        tft.fillRect(barX + 1, barY + 1, barWidth - 2, barHeight - 2, ST77XX_BLACK);
-        
-        // Fill progress with gradient effect
-        if (filled > 2) {
-          tft.fillRect(barX + 1, barY + 1, filled - 2, barHeight - 2, ST77XX_GREEN);
-        }
-        
-        // Bytes info
-        char bytesStr[32];
-        snprintf(bytesStr, sizeof(bytesStr), "%uK / %uK", otaProgress / 1024, otaTotal / 1024);
-        tft.fillRect(8, 95, 112, 12, ST77XX_BLACK);
-        tft_drawtext(8, 95, bytesStr, 1, ST77XX_CYAN);
-      }
-      
-      // Animated indicator that we're still receiving
-      if (now - lastAnimMs >= 200) {
-        lastAnimMs = now;
-        animFrame = (animFrame + 1) % 4;
-        
-        const char* spinner[] = {"|", "/", "-", "\\"};
-        tft.fillRect(DISPLAY_WIDTH - 16, 48, 12, 12, ST77XX_BLACK);
-        tft_drawtext(DISPLAY_WIDTH - 14, 48, spinner[animFrame], 1, ST77XX_GREEN);
-      }
-      break;
-    }
-    
-    case OTA_COMPLETE: {
-      tft.fillRect(8, 50, 112, 60, ST77XX_BLACK);
-      tft_drawtext(16, 55, "Update complete!", 1, ST77XX_GREEN);
-      tft_drawtext(24, 75, "Rebooting...", 1, ST77XX_CYAN);
-      
-      // Countdown animation
-      if (now - lastAnimMs >= 500) {
-        lastAnimMs = now;
-        animFrame++;
-        
-        char countStr[8];
-        int remaining = 3 - (animFrame / 2);
-        if (remaining > 0) {
-          snprintf(countStr, sizeof(countStr), "%d", remaining);
-          tft.fillRect(56, 100, 16, 20, ST77XX_BLACK);
-          tft_drawtext(60, 100, countStr, 2, ST77XX_WHITE);
-        }
-      }
-      break;
-    }
-    
-    case OTA_ERROR: {
-      tft.fillRect(8, 45, 112, 80, ST77XX_BLACK);
-      tft_drawtext(20, 50, "Update Failed!", 1, ST77XX_RED);
-      
-      const char* errStr = otaErrorToText(otaErrorCode);
-      tft_drawtext(8, 70, errStr, 1, ST77XX_YELLOW);
-      
-      char codeStr[20];
-      snprintf(codeStr, sizeof(codeStr), "Code: %d", otaErrorCode);
-      tft_drawtext(8, 85, codeStr, 1, ST77XX_CYAN);
-      
-      // Auto-resume after 3 seconds
-      if (now - otaLastUpdateMs > 3000) {
-        tft_drawtext(8, 110, "Resuming camera...", 1, ST77XX_WHITE);
-        delay(500);
-        
-        // Reset OTA state and resume
-        otaState = OTA_IDLE;
-        otaInProgress = false;
-        cameraPaused = false;
-        freezeFrame = false;
-        lastState = OTA_IDLE;
-        lastPercent = 101;
-        
-        // Clear screen for camera view
-        tft.fillScreen(ST77XX_BLACK);
-      }
-      break;
-    }
-    
-    default:
-      break;
   }
 }
 
@@ -1073,6 +925,66 @@ void cameraTask(void *parameter) {
     
     // Small yield for other tasks
     taskYIELD();
+  }
+}
+
+// Display OTA progress overlay - called from main loop
+// Shows progress bar on bottom portion of screen, updates continuously
+void displayOTAOverlay() {
+  if (!otaInProgress) return;
+  
+  unsigned int percent = 0;
+  if (otaTotal > 0) {
+    percent = (otaProgress * 100U) / otaTotal;
+  }
+  
+  // Only update if changed
+  if (percent == otaLastPercentShown && !otaStarted && !otaComplete && !otaError) {
+    return;
+  }
+  otaLastPercentShown = percent;
+  
+  // OTA overlay box at bottom of screen
+  const int boxY = DISPLAY_HEIGHT - 60;
+  const int boxH = 60;
+  const int barX = 8;
+  const int barY = DISPLAY_HEIGHT - 20;
+  const int barWidth = DISPLAY_WIDTH - 16;
+  const int barHeight = 12;
+  
+  // Dark background for overlay
+  tft.fillRect(0, boxY, DISPLAY_WIDTH, boxH, 0x0000);
+  
+  if (otaError) {
+    // Error state
+    tft_drawtext(8, boxY + 8, "OTA ERROR", 1, ST77XX_RED);
+    tft_drawtext(8, boxY + 24, otaErrorToText(otaErrorCode), 1, ST77XX_YELLOW);
+    return;
+  }
+  
+  if (otaComplete) {
+    // Complete - rebooting
+    tft_drawtext(8, boxY + 8, "UPDATE COMPLETE", 1, ST77XX_GREEN);
+    tft_drawtext(8, boxY + 24, "Rebooting...", 1, ST77XX_CYAN);
+    return;
+  }
+  
+  if (otaStarted) {
+    otaStarted = false;  // Only show once
+    tft_drawtext(8, boxY + 8, "OTA UPDATE", 1, ST77XX_GREEN);
+  }
+  
+  // Progress text
+  char progressStr[24];
+  snprintf(progressStr, sizeof(progressStr), "Receiving: %u%%", percent);
+  tft_drawtext(8, boxY + 8, progressStr, 1, ST77XX_YELLOW);
+  
+  // Progress bar
+  int filled = (barWidth * static_cast<int>(percent)) / 100;
+  tft.drawRect(barX, barY, barWidth, barHeight, ST77XX_WHITE);
+  tft.fillRect(barX + 1, barY + 1, barWidth - 2, barHeight - 2, ST77XX_BLACK);
+  if (filled > 2) {
+    tft.fillRect(barX + 1, barY + 1, filled - 2, barHeight - 2, ST77XX_GREEN);
   }
 }
 
@@ -1279,10 +1191,11 @@ void savePhotoToSD() {
 
 // main loop
 void loop() {
-  // During OTA, display OTA status screen (continuously updated)
+  // Show OTA progress overlay when OTA is active
+  // Display keeps updating even during OTA
   if (otaInProgress) {
-    displayOTAScreen();
-    delay(10);  // Small delay for display refresh
+    displayOTAOverlay();
+    delay(50);  // Smooth overlay updates
     return;
   }
   
@@ -1298,7 +1211,7 @@ void loop() {
     savePhotoToSD();
   }
   
-  // OTA is handled by dedicated task on Core 1 - runs alongside display
+  // OTA is handled by dedicated task on Core 1 - no need to call here
 
   // Live video mode
   if (LIVE_VIDEO_MODE && !freezeFrame && !cameraPaused && !photoDisplayed) {
