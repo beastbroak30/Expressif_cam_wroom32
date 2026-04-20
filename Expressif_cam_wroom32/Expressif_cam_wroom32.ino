@@ -47,17 +47,9 @@ float currentFps = 0.0f;
 
 // === Dual-core Processing ===
 TaskHandle_t cameraTaskHandle = NULL;
-TaskHandle_t otaTaskHandle = NULL;  // OTA runs on Core 1 with display
 volatile bool newFrameReady = false;
 volatile bool frameBeingDisplayed = false;
-volatile bool cameraPaused = false;
-volatile bool otaInProgress = false;  // OTA active - display shows progress
-volatile unsigned int otaProgress = 0;  // 0-100 percent
-volatile unsigned int otaTotal = 100;
-volatile bool otaStarted = false;
-volatile bool otaComplete = false;
-volatile bool otaError = false;
-volatile ota_error_t otaErrorCode = OTA_AUTH_ERROR;
+volatile bool cameraPaused = false;  // Pause camera task during SD operations
 uint16_t *displayBuffer = NULL;
 SemaphoreHandle_t frameMutex = NULL;
 
@@ -413,55 +405,26 @@ void setupOTA() {
   ArduinoOTA.setHostname(OTA_HOSTNAME);
   ArduinoOTA.setTimeout(20000);  // Increased timeout for reliability
   ArduinoOTA.onStart([]() {
-    // OTA started - camera pauses, display continues for progress
-    otaInProgress = true;
-    otaStarted = true;
-    otaComplete = false;
-    otaError = false;
-    otaProgress = 0;
-    cameraPaused = true;
-    freezeFrame = true;
-    
     otaLastPercentShown = 101;
-    Serial.println("OTA start - camera paused, display active");
+    showOTAStatus("Starting update", "Preparing flash", ST77XX_GREEN);
+    Serial.println("OTA start");
   });
   ArduinoOTA.onEnd([]() {
-    otaComplete = true;
-    otaProgress = 100;
+    showOTAStatus("Update complete", "Rebooting...", ST77XX_GREEN);
     Serial.println("\nOTA end");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    otaProgress = progress;
-    otaTotal = total;
+    showOTAProgress(progress, total);
     Serial.printf("OTA Progress: %u%%\r", (progress * 100U) / total);
   });
   ArduinoOTA.onError([](ota_error_t error) {
-    otaError = true;
-    otaErrorCode = error;
+    char errorText[24];
+    snprintf(errorText, sizeof(errorText), "Error code: %u", error);
+    showOTAStatus(otaErrorToText(error), errorText, ST77XX_RED);
     Serial.printf("OTA Error[%u]: %s\n", error, otaErrorToText(error));
-    
-    // Resume tasks on error after display shows it
-    delay(2000);
-    otaInProgress = false;
-    otaStarted = false;
-    cameraPaused = false;
-    freezeFrame = false;
   });
   ArduinoOTA.begin();
   bootLogOK();
-  
-  // Start OTA task on Core 1 - same core as display
-  // WiFi still handled by Core 0, but OTA logic on Core 1
-  xTaskCreatePinnedToCore(
-    otaTask,           // Task function  
-    "OTA_Task",        // Name
-    4096,              // Stack
-    NULL,              // Parameters
-    2,                 // Priority 2 (display runs in loop)
-    &otaTaskHandle,    // Handle
-    1                  // Core 1 (same as main loop/display)
-  );
-  Serial.println("OTA task started on Core 1");
   
   bootLog("IP: 192.168.1.45");
   bootLog("OTA: KANCAM");
@@ -823,25 +786,6 @@ void downsampleImage(uint16_t* src, int srcW, int srcH, uint16_t* dst, int dstW,
   }
 }
 
-// OTA Task - runs on Core 1 alongside display
-// Handles ArduinoOTA polling, display updates done in main loop
-void otaTask(void *parameter) {
-  Serial.println("OTA task started on Core 1");
-  
-  while (true) {
-    // OTA.handle() must be called frequently to detect incoming updates
-    ArduinoOTA.handle();
-    
-    // During OTA, run fast to handle WiFi packets
-    // Otherwise, longer delay is fine
-    if (otaInProgress) {
-      vTaskDelay(pdMS_TO_TICKS(5));  // Fast during OTA
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(20));  // Normal: check every 20ms
-    }
-  }
-}
-
 // Camera capture task - runs on Core 0
 void cameraTask(void *parameter) {
   Serial.println("Camera task started on Core 0");
@@ -928,66 +872,6 @@ void cameraTask(void *parameter) {
   }
 }
 
-// Display OTA progress overlay - called from main loop
-// Shows progress bar on bottom portion of screen, updates continuously
-void displayOTAOverlay() {
-  if (!otaInProgress) return;
-  
-  unsigned int percent = 0;
-  if (otaTotal > 0) {
-    percent = (otaProgress * 100U) / otaTotal;
-  }
-  
-  // Only update if changed
-  if (percent == otaLastPercentShown && !otaStarted && !otaComplete && !otaError) {
-    return;
-  }
-  otaLastPercentShown = percent;
-  
-  // OTA overlay box at bottom of screen
-  const int boxY = DISPLAY_HEIGHT - 60;
-  const int boxH = 60;
-  const int barX = 8;
-  const int barY = DISPLAY_HEIGHT - 20;
-  const int barWidth = DISPLAY_WIDTH - 16;
-  const int barHeight = 12;
-  
-  // Dark background for overlay
-  tft.fillRect(0, boxY, DISPLAY_WIDTH, boxH, 0x0000);
-  
-  if (otaError) {
-    // Error state
-    tft_drawtext(8, boxY + 8, "OTA ERROR", 1, ST77XX_RED);
-    tft_drawtext(8, boxY + 24, otaErrorToText(otaErrorCode), 1, ST77XX_YELLOW);
-    return;
-  }
-  
-  if (otaComplete) {
-    // Complete - rebooting
-    tft_drawtext(8, boxY + 8, "UPDATE COMPLETE", 1, ST77XX_GREEN);
-    tft_drawtext(8, boxY + 24, "Rebooting...", 1, ST77XX_CYAN);
-    return;
-  }
-  
-  if (otaStarted) {
-    otaStarted = false;  // Only show once
-    tft_drawtext(8, boxY + 8, "OTA UPDATE", 1, ST77XX_GREEN);
-  }
-  
-  // Progress text
-  char progressStr[24];
-  snprintf(progressStr, sizeof(progressStr), "Receiving: %u%%", percent);
-  tft_drawtext(8, boxY + 8, progressStr, 1, ST77XX_YELLOW);
-  
-  // Progress bar
-  int filled = (barWidth * static_cast<int>(percent)) / 100;
-  tft.drawRect(barX, barY, barWidth, barHeight, ST77XX_WHITE);
-  tft.fillRect(barX + 1, barY + 1, barWidth - 2, barHeight - 2, ST77XX_BLACK);
-  if (filled > 2) {
-    tft.fillRect(barX + 1, barY + 1, filled - 2, barHeight - 2, ST77XX_GREEN);
-  }
-}
-
 // Display frame from buffer (called from main loop on Core 1)
 void displayFrameFromBuffer() {
   if (!newFrameReady) return;
@@ -1054,67 +938,6 @@ void handleButtonPress() {
   saveRequested = true;  // Will be handled in main loop
 }
 
-// Restore camera and TFT after SD card operations
-// SD_MMC and TFT share GPIO 2, 14, 15 - need proper sequencing
-void restoreCameraAfterSD() {
-  Serial.println("Restoring camera and TFT...");
-  
-  // 1. Ensure camera is deinit'd (may have been left in JPEG mode)
-  esp_camera_deinit();
-  delay(100);
-  
-  // 2. Re-init TFT first (GPIO 2, 14, 15 now free)
-  tft.initR(INITR_GREENTAB);
-  tft.setRotation(0);
-  tft.fillScreen(ST77XX_BLACK);
-  delay(50);
-  
-  // 3. Re-init camera in RGB565 mode
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 24000000;
-  config.pixel_format = PIXFORMAT_RGB565;
-  config.frame_size = FRAMESIZE_QVGA;
-  config.jpeg_quality = 12;
-  config.fb_count = 2;
-  config.grab_mode = CAMERA_GRAB_LATEST;
-  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
-  
-  if (esp_camera_init(&config) != ESP_OK) {
-    Serial.println("Camera restore failed! Rebooting...");
-    ESP.restart();
-  }
-  
-  // 4. Restore sensor settings
-  sensor_t *s = esp_camera_sensor_get();
-  CameraSettings::configureSensorForLiveView(s);
-  s->set_special_effect(s, 0);
-  
-  // 5. Resume camera task
-  newFrameReady = false;
-  cameraPaused = false;
-  freezeFrame = false;
-  
-  Serial.println("Camera and TFT restored");
-}
-
 // Show status message with box
 void showStatusBox(const char* msg, uint16_t bgColor, uint16_t textColor) {
   int boxW = 100;
@@ -1140,19 +963,13 @@ void savePhotoToSD() {
   // 1. Pause camera task
   cameraPaused = true;
   freezeFrame = true;
-  delay(500);  // Wait for camera task to pause
+  delay(50);  // Wait for camera task to pause
   Serial.println("Camera paused");
   
   // 2. Show "Saving..." message
   showStatusBox("Saving...", ST77XX_BLUE, ST77XX_WHITE);
-  delay(100);  // Let user see the message
   
-  // 3. Deinit camera BEFORE SD init (releases shared pins)
-  esp_camera_deinit();
-  delay(100);
-  Serial.println("Camera deinit for SD access");
-  
-  // 4. Initialize SD card (takes over shared GPIO pins)
+  // 3. Initialize SD card (takes over TFT pins temporarily)
   Serial.println("Initializing SD card...");
   SDCardHandler sdCard(&photoCounter);
   
@@ -1160,25 +977,27 @@ void savePhotoToSD() {
     Serial.println("SD Card init failed!");
     
     // Re-init TFT and show error
-    delay(100);
+    delay(50);
     tft.initR(INITR_GREENTAB);
     tft.setRotation(0);
     showStatusBox("SD FAILED!", ST77XX_RED, ST77XX_WHITE);
     delay(1500);
     
-    // Restore camera
-    restoreCameraAfterSD();
+    // Resume camera
+    cameraPaused = false;
+    freezeFrame = false;
     return;
   }
   Serial.println("SD Card initialized");
   
-  // 5. Give SD card time to stabilize
+  // 3b. Give SD card time to stabilize
   delay(200);
   
-  // 6. Scan SD card and update counter to avoid overwriting
+  // 3c. Scan SD card and update counter to avoid overwriting
+  // This ensures we always use a unique filename
   sdCard.updateCounterFromExistingPhotos();
   
-  // 7. Capture and save photo (camera reinit handled inside)
+  // 4. Save the current camera config for restoration
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -1198,50 +1017,60 @@ void savePhotoToSD() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 24000000;
+  config.xclk_freq_hz = 24000000;  // Increased from 20MHz to 24MHz for faster operation
   
+  // 5. Capture and save photo with correct colors (using SDCardHandler module)
+  //    This module applies the correct sensor settings to fix greenish tint
   bool success = sdCard.captureAndSave(config, psramFound(), &rtcHandler);
   
-  // 8. Close SD card - MUST release pins before TFT init
+  // 6. Close SD card
   sdCard.end();
-  delay(100);  // Let SD_MMC fully release GPIO
   Serial.println("SD Card closed");
   
-  // 9. Restore camera and TFT
-  restoreCameraAfterSD();
+  // 7. Restore camera to RGB565 mode for live view
+  esp_camera_deinit();
+  delay(100);
   
-  // 10. Show result message
-  if (success) {
-    char msg[20];
-    if (rtcHandler.isAvailable()) {
-      rtcHandler.getDateTimeCompactStr(msg, sizeof(msg));
-    } else {
-      snprintf(msg, sizeof(msg), "SAVED #%d", photoCounter);
-    }
-    showStatusBox(msg, ST77XX_GREEN, ST77XX_BLACK);
-    Serial.printf("Photo saved! Counter: %d\n", photoCounter);
-  } else {
-    showStatusBox("SAVE FAIL", ST77XX_RED, ST77XX_WHITE);
-    Serial.println("Photo save failed!");
+  config.pixel_format = PIXFORMAT_RGB565;
+  config.frame_size = FRAMESIZE_QVGA;  // 320x240
+  config.jpeg_quality = 12;
+  config.fb_count = 2;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+  config.fb_location = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+  
+  if (esp_camera_init(&config) != ESP_OK) {
+    Serial.println("Camera restore failed! Rebooting...");
+    ESP.restart();
   }
-  delay(1000);
   
-  // 11. Clear display and resume live view
+  // Restore sensor settings using CameraSettings module
+  sensor_t *s = esp_camera_sensor_get();
+  CameraSettings::configureSensorForLiveView(s);
+  s->set_special_effect(s, 0);
+  
+  // 9. Re-init TFT (SD may have messed with pins)
+  delay(50);
+  tft.initR(INITR_GREENTAB);
+  tft.setRotation(0);
   tft.fillScreen(ST77XX_BLACK);
   
-  Serial.println("=== Photo save complete ===");
+  // 10. Show success message
+  char msg[20];
+  snprintf(msg, sizeof(msg), "Saved #%d", photoCounter - 1);
+  showStatusBox(msg, ST77XX_GREEN, ST77XX_BLACK);
+  delay(1000);
+  
+  // 11. Resume camera task
+  tft.fillScreen(ST77XX_BLACK);
+  newFrameReady = false;
+  cameraPaused = false;
+  freezeFrame = false;
+  
+  Serial.println("=== Photo save complete, camera resumed ===");
 }
 
 // main loop
 void loop() {
-  // Show OTA progress overlay when OTA is active
-  // Display keeps updating even during OTA
-  if (otaInProgress) {
-    displayOTAOverlay();
-    delay(50);  // Smooth overlay updates
-    return;
-  }
-  
   // Check for button interrupt (async, responsive)
   if (buttonInterruptFlag) {
     buttonInterruptFlag = false;
@@ -1254,7 +1083,10 @@ void loop() {
     savePhotoToSD();
   }
   
-  // OTA is handled by dedicated task on Core 1 - no need to call here
+  // Handle OTA updates (must be called frequently)
+  if (otaEnabled) {
+    ArduinoOTA.handle();
+  }
 
   // Live video mode
   if (LIVE_VIDEO_MODE && !freezeFrame && !cameraPaused && !photoDisplayed) {
@@ -1265,7 +1097,7 @@ void loop() {
   if (!LIVE_VIDEO_MODE) {
     delay(10);
   } else {
-    // Give other tasks time to run
+    // Give WiFi/OTA tasks time to run (1ms is enough)
     delay(1);
   }
 }
